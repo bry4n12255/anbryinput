@@ -15,6 +15,11 @@ ifeq ($(NATIVE),1)
 CFLAGS += -march=native -mtune=native
 endif
 
+ifeq ($(AGGRESSIVE),1)
+CFLAGS += -O3 -flto
+LDFLAGS += -flto
+endif
+
 DRIVER_CFLAGS = -std=c11 -fPIC -D_POSIX_C_SOURCE=200809L $(XORG_CFLAGS)
 TOOL_CFLAGS   = -std=c11 -D_POSIX_C_SOURCE=200809L $(XI_CFLAGS)
 
@@ -37,7 +42,7 @@ $(DRIVER): $(SRCS)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(DRIVER_CFLAGS) $(LDFLAGS) -shared -nostartfiles $(SRCS) -o $(DRIVER)
 
 $(LATENCY_TOOL): tools/mouse_latency_xi2.c
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(TOOL_CFLAGS) $(LDFLAGS) tools/mouse_latency_xi2.c -o $(LATENCY_TOOL) $(XI_LIBS) -lm
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(TOOL_CFLAGS) $(LDFLAGS) tools/mouse_latency_xi2.c -o $(LATENCY_TOOL) $(XI_LIBS)
 
 install: $(DRIVER)
 	$(INSTALL) -Dm755 $(DRIVER) $(DESTDIR)$(DRIVER_DIR)/$(DRIVER)

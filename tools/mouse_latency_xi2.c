@@ -102,14 +102,14 @@ static int compare_double(const void *a, const void *b)
     return 0;
 }
 
-static double percentile(const Stats *stats, double pct)
+static double percentile(const Stats *stats, unsigned int pct)
 {
     size_t index;
 
     if (stats->count == 0)
         return NAN;
 
-    index = (size_t)ceil((pct / 100.0) * (double)stats->count);
+    index = (stats->count * (size_t)pct + 99) / 100;
     if (index == 0)
         index = 1;
     if (index > stats->count)
@@ -141,10 +141,10 @@ static void print_stats(Stats *stats, const TimestampQueue *queue)
     printf("samples: %zu\n", stats->count);
     printf("mean_ms: %.3f\n", sum / (double)stats->count);
     printf("min_ms: %.3f\n", min);
-    printf("p50_ms: %.3f\n", percentile(stats, 50.0));
-    printf("p90_ms: %.3f\n", percentile(stats, 90.0));
-    printf("p95_ms: %.3f\n", percentile(stats, 95.0));
-    printf("p99_ms: %.3f\n", percentile(stats, 99.0));
+    printf("p50_ms: %.3f\n", percentile(stats, 50));
+    printf("p90_ms: %.3f\n", percentile(stats, 90));
+    printf("p95_ms: %.3f\n", percentile(stats, 95));
+    printf("p99_ms: %.3f\n", percentile(stats, 99));
     printf("max_ms: %.3f\n", max);
     printf("unmatched_evdev_queued: %zu\n", queue->count);
     printf("queue_overflow: %zu\n", queue->overflow);

@@ -62,6 +62,12 @@ Build optimized for the current CPU:
 make NATIVE=1
 ```
 
+Build with more aggressive compiler optimization:
+
+```sh
+make NATIVE=1 AGGRESSIVE=1
+```
+
 Build the latency tool:
 
 ```sh
