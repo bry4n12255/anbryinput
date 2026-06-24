@@ -8,16 +8,17 @@ XI_CFLAGS   := $(shell $(PKG_CONFIG) --cflags xi x11)
 XI_LIBS     := $(shell $(PKG_CONFIG) --libs xi x11)
 
 CPPFLAGS ?=
-CFLAGS   ?= -O2 -Wall
+OPTFLAGS ?= -O2
+CFLAGS   ?= -Wall
 LDFLAGS  ?=
 
-ifeq ($(NATIVE),1)
-CFLAGS += -march=native -mtune=native
+ifeq ($(AGGRESSIVE),1)
+OPTFLAGS = -O3 -flto
+LDFLAGS += -flto
 endif
 
-ifeq ($(AGGRESSIVE),1)
-CFLAGS += -O3 -flto
-LDFLAGS += -flto
+ifeq ($(NATIVE),1)
+OPTFLAGS += -march=native -mtune=native
 endif
 
 DRIVER_CFLAGS = -std=c11 -fPIC -D_POSIX_C_SOURCE=200809L $(XORG_CFLAGS)
@@ -39,10 +40,10 @@ tools: $(LATENCY_TOOL)
 latency-tool: $(LATENCY_TOOL)
 
 $(DRIVER): $(SRCS)
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(DRIVER_CFLAGS) $(LDFLAGS) -shared -nostartfiles $(SRCS) -o $(DRIVER)
+	$(CC) $(CPPFLAGS) $(OPTFLAGS) $(CFLAGS) $(DRIVER_CFLAGS) $(LDFLAGS) -shared -nostartfiles $(SRCS) -o $(DRIVER)
 
 $(LATENCY_TOOL): tools/mouse_latency_xi2.c
-	$(CC) $(CPPFLAGS) $(CFLAGS) $(TOOL_CFLAGS) $(LDFLAGS) tools/mouse_latency_xi2.c -o $(LATENCY_TOOL) $(XI_LIBS)
+	$(CC) $(CPPFLAGS) $(OPTFLAGS) $(CFLAGS) $(TOOL_CFLAGS) $(LDFLAGS) tools/mouse_latency_xi2.c -o $(LATENCY_TOOL) $(XI_LIBS)
 
 install: $(DRIVER)
 	$(INSTALL) -Dm755 $(DRIVER) $(DESTDIR)$(DRIVER_DIR)/$(DRIVER)
