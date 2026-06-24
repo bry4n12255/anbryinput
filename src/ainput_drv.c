@@ -75,20 +75,10 @@ typedef enum
 
 typedef struct
 {
-    /*
-     * Frequently touched pointers and doubles are kept near the top for a
-     * compact layout. This is micro-optimization territory, but harmless.
-     */
     const char *xkb_layout, *xkb_variant;
     ValuatorMask *motion_mask;
     double effective_sensitivity;
 
-    /*
-     * effective_sensitivity is cached as:
-     *   sensitivity * (reference_dpi / dpi)
-     *
-     * The hot path only multiplies by the cached value.
-     */
     float sensitivity, dpi, reference_dpi;
 
     Atom prop_sensitivity;
@@ -143,10 +133,6 @@ static inline void ainput_post_relative_motion(InputInfoPtr pInfo, double dx, do
 {
     ValuatorMask *mask = ((AInputPriv *)pInfo->private)->motion_mask;
 
-    /*
-     * Reuse one ValuatorMask per device instead of allocating per motion
-     * event. The mask still has to be cleared before each post.
-     */
     valuator_mask_zero(mask);
     valuator_mask_set_double(mask, 0, dx);
     valuator_mask_set_double(mask, 1, dy);
@@ -174,10 +160,6 @@ static void ainput_apply_sensitivity_all(float new_sens)
 {
     InputInfoPtr pInfo;
 
-    /*
-     * Some physical mice appear as multiple X devices. Applying the runtime
-     * property to all AInput mouse instances keeps those split devices in sync.
-     */
     for (pInfo = xf86FirstLocalDevice(); pInfo; pInfo = pInfo->next)
     {
         AInputPriv *priv;
@@ -264,7 +246,7 @@ static void ainput_read_keyboard(InputInfoPtr pInfo)
         {
             const struct input_event *ev = &events[i];
 
-            /* Xorg keycodes are evdev keycodes plus 8. Ignore autorepeat. */
+            // Xorg keycodes are evdev keycodes plus 8. Ignore autorepeat.
             if (ev->type != EV_KEY || ev->value == 2)
                 continue;
 
@@ -347,11 +329,6 @@ static void ainput_read_mouse(InputInfoPtr pInfo)
 
                 double sens = priv->effective_sensitivity;
 
-                /*
-                 * evdev reports one frame as multiple events followed by
-                 * SYN_REPORT. Accumulate REL_X/REL_Y and post one X motion
-                 * event per frame.
-                 */
                 if (priv->acc_x != 0 || priv->acc_y != 0)
                 {
                     double dx = (double)priv->acc_x * sens;
@@ -466,10 +443,6 @@ static int ainput_device_init(DeviceIntPtr dev)
 
         float init_val = priv->sensitivity;
 
-        /*
-         * Creating the property calls the property handler. Guard that initial
-         * write so it does not look like a user-requested runtime change.
-         */
         priv->initializing_property = 1;
         XIChangeDeviceProperty(dev, priv->prop_sensitivity, XA_FLOAT, 32,
                                PropModeReplace, 1, &init_val, FALSE);
@@ -625,10 +598,6 @@ static void ainput_detect_absolute_axes(AInputPriv *priv,
 
 static void ainput_setup_info(InputInfoPtr pInfo, AInputPriv *priv)
 {
-    /*
-     * Select the hot-path function once. Mouse and keyboard event loops stay
-     * separate so every read does less branching.
-     */
     pInfo->private = priv;
     pInfo->read_input = (priv->type == DEV_MOUSE) ? ainput_read_mouse : ainput_read_keyboard;
     pInfo->device_control = ainput_control;
