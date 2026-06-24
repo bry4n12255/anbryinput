@@ -118,6 +118,8 @@ sudo xbps-install -S base-devel pkg-config xorg-server-devel libX11-devel libXi-
 
 </details>
 
+Build:
+
 ```sh
 make
 ```
