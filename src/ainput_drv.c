@@ -48,7 +48,7 @@
 #include <linux/input.h>
 
 #define DRIVER_NAME "ainput"
-#define DRIVER_VERSION 1.1
+#define DRIVER_VERSION 1.0
 
 #define PROP_SENSITIVITY "AInput Sensitivity"
 #define AINPUT_EVENT_BATCH 16
