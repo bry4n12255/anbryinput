@@ -52,6 +52,72 @@ XInput ABI, rebuild AnbryInput against that server's development headers.
 Dependencies include a C compiler, `pkg-config`, Xorg/XLibre server development
 headers, and X11/XInput development libraries for the benchmark tool.
 
+Generic requirements:
+
+- C compiler
+- `make`
+- `pkg-config`
+- Xorg/XLibre server development headers
+- X11 development headers
+- XInput development headers
+- Linux input headers
+
+Package examples:
+
+<details>
+<summary>Arch / CachyOS / Artix with Xorg</summary>
+
+```sh
+sudo pacman -S base-devel pkgconf xorg-server-devel libx11 libxi
+```
+
+</details>
+
+<details>
+<summary>Arch / CachyOS / Artix with XLibre</summary>
+
+```sh
+sudo pacman -S base-devel pkgconf xlibre-xserver-devel libx11 libxi
+```
+
+</details>
+
+<details>
+<summary>Debian / Ubuntu</summary>
+
+```sh
+sudo apt install build-essential pkg-config xserver-xorg-dev libx11-dev libxi-dev x11proto-dev
+```
+
+</details>
+
+<details>
+<summary>Fedora</summary>
+
+```sh
+sudo dnf install gcc make pkgconf-pkg-config xorg-x11-server-devel libX11-devel libXi-devel xorg-x11-proto-devel
+```
+
+</details>
+
+<details>
+<summary>openSUSE</summary>
+
+```sh
+sudo zypper install gcc make pkgconf-pkg-config xorg-x11-server-sdk libX11-devel libXi-devel
+```
+
+</details>
+
+<details>
+<summary>Void Linux</summary>
+
+```sh
+sudo xbps-install -S base-devel pkg-config xorg-server-devel libX11-devel libXi-devel
+```
+
+</details>
+
 ```sh
 make
 ```
