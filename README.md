@@ -141,8 +141,38 @@ Build the latency tool:
 ```sh
 make tools
 ```
-
 `make latency-tool` is also available as an alias.
+
+### Build with Experimental Xorg/XLibre Patches
+
+AnbryInput can optionally use experimental Xorg/XLibre patches that provide
+faster paths for relative mouse motion.
+
+These patches are **not part of upstream Xorg/XLibre**. They must be applied
+when building your X server. If they are not present, simply build AnbryInput
+normally.
+
+#### Fast Relative Motion
+
+Uses a small X server helper (`QueuePointerRelativeMotion2D`) that avoids some
+generic event setup while still going through the normal Xorg input pipeline.
+
+```sh
+make XSERVER_FAST_REL2D=1
+```
+
+#### Direct Relative Motion
+
+Uses a dedicated X server fast path (`QueueAInputRelativeMotion2D`) written
+specifically for AnbryInput. It bypasses much of the generic pointer event
+generation while still producing the expected `XI_RawMotion` and `XI_Motion`
+events.
+
+```sh
+make XSERVER_DIRECT_REL2D=1
+```
+
+**They can also integrate with compiler optimizations**
 
 ## Install
 

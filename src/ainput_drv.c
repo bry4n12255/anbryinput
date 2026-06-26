@@ -47,8 +47,28 @@
 
 #include <linux/input.h>
 
+/*
+ * Experimental Xorg/XLibre fast path.
+ *
+ * These only work with patched Xorg/XLibre servers that export the matching
+ * symbol. Keep them disabled for normal builds.
+ *
+ * Enable the safer fast path with:
+ *   make XSERVER_FAST_REL2D=1
+ *
+ * Enable the more aggressive direct path with:
+ *   make XSERVER_DIRECT_REL2D=1
+ */
+#ifdef AINPUT_XSERVER_DIRECT_REL2D
+extern void QueueAInputRelativeMotion2D(DeviceIntPtr pDev, double dx, double dy);
+#endif
+
+#ifdef AINPUT_XSERVER_FAST_REL2D
+extern void QueuePointerRelativeMotion2D(DeviceIntPtr pDev, double dx, double dy);
+#endif
+
 #define DRIVER_NAME "ainput"
-#define DRIVER_VERSION 1.0
+#define DRIVER_VERSION 1.1
 
 #define PROP_SENSITIVITY "AInput Sensitivity"
 #define AINPUT_EVENT_BATCH 16
@@ -64,9 +84,6 @@
 #define BIT_IS_SET(arr, bit) \
     (((arr)[(bit) / BITS_PER_LONG] >> ((bit) % BITS_PER_LONG)) & 1UL)
 
-/* ------------------------------------------------------------------ */
-/* Per-device state                                                   */
-/* ------------------------------------------------------------------ */
 typedef enum
 {
     DEV_KEYBOARD,
@@ -96,26 +113,15 @@ typedef struct
     int last_abs_x, last_abs_y;
 } AInputPriv;
 
-/* ------------------------------------------------------------------ */
-/* Event reading and dispatch                                         */
-/* ------------------------------------------------------------------ */
-
 static void ainput_fd_handler(int fd, int ready, void *data)
 {
     InputInfoPtr pInfo = data;
     if (pInfo && pInfo->read_input)
-    {
         pInfo->read_input(pInfo);
-    }
 }
 
 static inline void ainput_update_effective_sensitivity(AInputPriv *priv)
 {
-    /*
-     * Absolute devices do not use DPI normalization here. For relative mice,
-     * DPI normalization lets a config written for one DPI scale predictably to
-     * another.
-     */
     if (priv->is_absolute || priv->dpi <= 0.0f || priv->reference_dpi <= 0.0f)
         priv->effective_sensitivity = (double)priv->sensitivity;
     else
@@ -129,17 +135,24 @@ static void ainput_apply_sensitivity(AInputPriv *priv, float new_sens)
     ainput_update_effective_sensitivity(priv);
 }
 
+/*
+    Make sure you compiled XLibre or Xorg with the proper patches
+*/
 static inline void ainput_post_relative_motion(InputInfoPtr pInfo, double dx, double dy)
 {
+#ifdef AINPUT_XSERVER_DIRECT_REL2D
+    QueueAInputRelativeMotion2D(pInfo->dev, dx, dy);
+#elif defined(AINPUT_XSERVER_FAST_REL2D)
+    QueuePointerRelativeMotion2D(pInfo->dev, dx, dy);
+#else
     ValuatorMask *mask = ((AInputPriv *)pInfo->private)->motion_mask;
 
     valuator_mask_zero(mask);
     valuator_mask_set_double(mask, 0, dx);
     valuator_mask_set_double(mask, 1, dy);
 
-    QueuePointerEvents(pInfo->dev, MotionNotify, 0,
-                       POINTER_RELATIVE,
-                       mask);
+    QueuePointerEvents(pInfo->dev, MotionNotify, 0, POINTER_RELATIVE, mask);
+#endif
 }
 
 static inline void ainput_post_button(InputInfoPtr pInfo, int button, int is_down)
@@ -246,7 +259,6 @@ static void ainput_read_keyboard(InputInfoPtr pInfo)
         {
             const struct input_event *ev = &events[i];
 
-            // Xorg keycodes are evdev keycodes plus 8. Ignore autorepeat.
             if (ev->type != EV_KEY || ev->value == 2)
                 continue;
 
@@ -276,19 +288,19 @@ static void ainput_read_mouse(InputInfoPtr pInfo)
             case EV_REL:
                 switch (ev->code)
                 {
-                case REL_X:
-                    priv->acc_x += ev->value;
-                    break;
-                case REL_Y:
-                    priv->acc_y += ev->value;
-                    break;
-                case REL_WHEEL:
-                {
-                    int button = (ev->value > 0) ? 4 : 5;
-                    ainput_post_button(pInfo, button, 1);
-                    ainput_post_button(pInfo, button, 0);
-                    break;
-                }
+                    case REL_X:
+                        priv->acc_x += ev->value;
+                        break;
+                    case REL_Y:
+                        priv->acc_y += ev->value;
+                        break;
+                    case REL_WHEEL:
+                    {
+                        int button = (ev->value > 0) ? 4 : 5;
+                        ainput_post_button(pInfo, button, 1);
+                        ainput_post_button(pInfo, button, 0);
+                        break;
+                    }
                 }
                 break;
 
@@ -342,10 +354,6 @@ static void ainput_read_mouse(InputInfoPtr pInfo)
 
                 if (priv->has_abs_event)
                 {
-                    /*
-                     * Absolute devices are converted to relative deltas.
-                     * The first sample only seeds the previous position.
-                     */
                     if (!priv->has_last_abs)
                     {
                         priv->last_abs_x = priv->abs_x;
@@ -379,10 +387,6 @@ static void ainput_read_mouse(InputInfoPtr pInfo)
         }
     }
 }
-
-/* ------------------------------------------------------------------ */
-/* Device initialization and lifecycle                                */
-/* ------------------------------------------------------------------ */
 
 static int ainput_device_init(DeviceIntPtr dev)
 {
@@ -543,7 +547,7 @@ static void ainput_read_options(InputInfoPtr pInfo, AInputPriv *priv)
 
     priv->dpi = ainput_positive_real_option(
         pInfo, "DPI", AINPUT_DEFAULT_DPI);
-        
+
     priv->reference_dpi = ainput_positive_real_option(
         pInfo, "ReferenceDPI", AINPUT_DEFAULT_DPI);
 }

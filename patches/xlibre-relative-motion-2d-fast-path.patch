@@ -1,0 +1,47 @@
+diff --git a/dix/getevents.c b/dix/getevents.c
+index b0cb3bc64..84abf80e8 100644
+--- a/dix/getevents.c
++++ b/dix/getevents.c
+@@ -1262,8 +1262,28 @@ storeLastValuators(DeviceIntPtr dev, ValuatorMask *mask, double devx, double dev
+             dev->last.valuators[i] = valuator_mask_get_double(mask, i);
+     }
+ 
++
+ }
+ 
++void
++QueuePointerRelativeMotion2D(DeviceIntPtr device, double dx, double dy)
++{
++    int nevents;
++    ValuatorMask mask = {0};
++
++    mask.last_bit = 1;
++    mask.has_unaccelerated = 0;
++    mask.mask[0] = 0x3;
++    mask.valuators[0] = dx;
++    mask.valuators[1] = dy;
++
++    nevents = GetPointerEvents(InputEventList, device, MotionNotify, 0,
++                               POINTER_RELATIVE, &mask);
++
++    queueEventList(device, InputEventList, nevents);
++}
++
++
+ /**
+  * Generate internal events representing this pointer event and enqueue them
+  * on the event queue.
+diff --git a/include/input.h b/include/input.h
+index de89ee37d..0f4a43002 100644
+--- a/include/input.h
++++ b/include/input.h
+@@ -437,6 +437,9 @@ extern _X_EXPORT void QueuePointerEvents(DeviceIntPtr pDev,
+                                          int buttons,
+                                          int flags, const ValuatorMask *mask);
+ 
++extern _X_EXPORT void QueuePointerRelativeMotion2D(DeviceIntPtr pDev,
++                                                   double dx, double dy);
++
+ extern _X_EXPORT int GetKeyboardEvents(InternalEvent *events,
+                                        DeviceIntPtr pDev,
+                                        int type,

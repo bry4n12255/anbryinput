@@ -1,0 +1,203 @@
+diff --git a/dix/getevents.c b/dix/getevents.c
+index b0cb3bc64..8f7b7a569 100644
+--- a/dix/getevents.c
++++ b/dix/getevents.c
+@@ -1288,6 +1288,107 @@ QueuePointerEvents(DeviceIntPtr device, int type,
+     queueEventList(device, InputEventList, nevents);
+ }
+ 
++/*
++ * Experimental AnbryInput-only relative 2D fast path.
++ *
++ * This intentionally supports only the narrow contract AnbryInput needs:
++ * relative mouse motion on axes 0/1, no acceleration, no scroll emulation,
++ * no absolute/tablet/touchpad handling, and no generic valuator traversal.
++ *
++ * It still preserves the externally important pieces:
++ * - XI_RawMotion
++ * - XI_Motion/core pointer motion
++ * - sprite movement, clipping, barriers, and screen crossing through
++ *   miPointerSetPosition()
++ * - master pointer last coordinates
++ *
++ * Drivers must only call this for simple relative pointer motion.
++ */
++void
++QueueAInputRelativeMotion2D(DeviceIntPtr device, double dx, double dy)
++{
++    CARD32 ms = GetTimeInMillis();
++    InternalEvent *events = InputEventList;
++    InternalEvent *out;
++    RawDeviceEvent *raw;
++    DeviceEvent *event;
++    DeviceIntPtr master;
++    ScreenPtr scr;
++    ValuatorMask history_mask = {0};
++    int prefix_events;
++    int num_events = 0;
++    int barrier_events = 0;
++    double old_x, old_y;
++    double screenx, screeny;
++
++    if (!device || !device->enabled || !device->valuator ||
++        device->valuator->numAxes < 2)
++        return;
++
++    scr = miPointerGetScreen(device);
++    if (!scr)
++        return;
++
++    out = UpdateFromMaster(events, device, DEVCHANGE_POINTER_EVENT, &num_events);
++    prefix_events = num_events;
++
++    raw = &out->raw_event;
++    init_raw(device, raw, ms, MotionNotify, 0);
++    SetBit(raw->valuators.mask, 0);
++    SetBit(raw->valuators.mask, 1);
++    raw->valuators.data_raw[0] = dx;
++    raw->valuators.data_raw[1] = dy;
++    raw->valuators.data[0] = dx;
++    raw->valuators.data[1] = dy;
++    out++;
++    num_events++;
++
++    old_x = device->last.valuators[0];
++    old_y = device->last.valuators[1];
++    screenx = old_x + dx;
++    screeny = old_y + dy;
++
++    scr = miPointerSetPosition(device, Relative, &screenx, &screeny,
++                               &barrier_events, out);
++    out += barrier_events;
++    num_events += barrier_events;
++
++    history_mask.last_bit = 1;
++    history_mask.mask[0] = 0x3;
++    history_mask.valuators[0] = screenx - scr->x;
++    history_mask.valuators[1] = screeny - scr->y;
++    updateHistory(device, &history_mask, ms);
++
++    device->last.valuators[0] = screenx;
++    device->last.valuators[1] = screeny;
++
++    if (!InputDevIsMaster(device) && !InputDevIsFloating(device)) {
++        master = GetMaster(device, MASTER_POINTER);
++        if (master) {
++            master->last.valuators[0] = screenx;
++            master->last.valuators[1] = screeny;
++        }
++    }
++
++    event = &out->device_event;
++    init_device_event(event, device, ms, EVENT_SOURCE_NORMAL);
++    event->type = ET_Motion;
++    event->detail.button = 0;
++    event_set_root_coordinates(event, screenx - scr->x, screeny - scr->y);
++    SetBit(event->valuators.mask, 0);
++    SetBit(event->valuators.mask, 1);
++    event->valuators.data[0] = screenx - scr->x;
++    event->valuators.data[1] = screeny - scr->y;
++    out++;
++    num_events++;
++
++    if (prefix_events == 0 && barrier_events == 0)
++        mieqEnqueueAInputMotionPair(device, &InputEventList[0],
++                                    &InputEventList[1]);
++    else
++        queueEventList(device, InputEventList, num_events);
++}
++
+ /**
+  * Helper function for GetPointerEvents, which only generates motion and
+  * raw motion events for the slave device: does not update the master device.
+diff --git a/include/input.h b/include/input.h
+index de89ee37d..595cb4fe1 100644
+--- a/include/input.h
++++ b/include/input.h
+@@ -437,6 +437,9 @@ extern _X_EXPORT void QueuePointerEvents(DeviceIntPtr pDev,
+                                          int buttons,
+                                          int flags, const ValuatorMask *mask);
+ 
++extern _X_EXPORT void QueueAInputRelativeMotion2D(DeviceIntPtr pDev,
++                                                  double dx, double dy);
++
+ extern _X_EXPORT int GetKeyboardEvents(InternalEvent *events,
+                                        DeviceIntPtr pDev,
+                                        int type,
+diff --git a/mi/mi_priv.h b/mi/mi_priv.h
+index ba52f0340..700c80673 100644
+--- a/mi/mi_priv.h
++++ b/mi/mi_priv.h
+@@ -39,6 +39,9 @@ void miStepDash(int dist, int * pDashIndex, unsigned char * pDash,
+ Bool mieqInit(void);
+ void mieqFini(void);
+ void mieqEnqueue(DeviceIntPtr pDev, InternalEvent *e);
++void mieqEnqueueAInputMotionPair(DeviceIntPtr pDev,
++                                 InternalEvent *raw,
++                                 InternalEvent *motion);
+ void mieqSwitchScreen(DeviceIntPtr pDev, ScreenPtr pScreen, Bool set_dequeue_screen);
+ void mieqProcessDeviceEvent(DeviceIntPtr dev, InternalEvent *event, ScreenPtr screen);
+ void mieqProcessInputEvents(void);
+diff --git a/mi/mieq.c b/mi/mieq.c
+index 96e318309..9c1594cbb 100644
+--- a/mi/mieq.c
++++ b/mi/mieq.c
+@@ -272,6 +272,58 @@ mieqEnqueue(DeviceIntPtr pDev, InternalEvent *e)
+     miEventQueue.tail = (oldtail + 1) % miEventQueue.nevents;
+ }
+ 
++static inline void
++mieqEnqueueAInputSlot(DeviceIntPtr pDev, InternalEvent *e,
++                      unsigned int tail, int isMotion)
++{
++    InternalEvent *evt = miEventQueue.events[tail].events;
++    Time time;
++
++    memcpy(evt, e, e->any.length);
++
++    time = evt->any.time;
++    if (time < miEventQueue.lastEventTime &&
++        miEventQueue.lastEventTime - time < 10000)
++        evt->any.time = miEventQueue.lastEventTime;
++
++    miEventQueue.lastEventTime = evt->any.time;
++    miEventQueue.events[tail].pScreen = pDev ? EnqueueScreen(pDev) : NULL;
++    miEventQueue.events[tail].pDev = pDev;
++    miEventQueue.lastMotion = isMotion;
++}
++
++/*
++ * AnbryInput-only queue fast path for the common pair:
++ *   ET_RawMotion followed by ET_Motion for the same device.
++ *
++ * This intentionally skips generic verification and per-event branching used
++ * by mieqEnqueue(). It must only be used by code that has already built these
++ * two exact event types and still wants normal mieq delivery semantics.
++ */
++void
++mieqEnqueueAInputMotionPair(DeviceIntPtr pDev,
++                            InternalEvent *raw,
++                            InternalEvent *motion)
++{
++    unsigned int tail;
++    size_t n_enqueued;
++
++    n_enqueued = mieqNumEnqueued(&miEventQueue);
++    if (n_enqueued + 2 >= miEventQueue.nevents) {
++        if (!mieqGrowQueue(&miEventQueue, miEventQueue.nevents << 1)) {
++            miEventQueue.dropped++;
++            return;
++        }
++    }
++
++    tail = miEventQueue.tail;
++    mieqEnqueueAInputSlot(pDev, raw, tail, 0);
++    tail = (tail + 1) % miEventQueue.nevents;
++
++    mieqEnqueueAInputSlot(pDev, motion, tail, pDev ? pDev->id : 0);
++    miEventQueue.tail = (tail + 1) % miEventQueue.nevents;
++}
++
+ /**
+  * Changes the screen reference events are being enqueued from.
+  * Input events are enqueued with a screen reference and dequeued and
