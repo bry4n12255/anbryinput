@@ -1,0 +1,142 @@
+diff --git a/dix/getevents.c b/dix/getevents.c
+index 12fcd4c..3208a91 100644
+--- a/dix/getevents.c
++++ b/dix/getevents.c
+@@ -1049,6 +1049,70 @@ QueueKeyboardEvents(DeviceIntPtr device, int type,
+     queueEventList(device, InputEventList, nevents);
+ }
+ 
++/*
++ * Experimental AnbryInput-only keyboard fast path.
++ *
++ * This intentionally supports only normal KeyPress/KeyRelease events from
++ * AnbryInput. It skips focus enter/leave handling and generic type dispatch.
++ * Drivers must pass X keycodes in the valid 8..255 range.
++ */
++void
++QueueAInputKey(DeviceIntPtr device, int keycode, int is_down)
++{
++    CARD32 ms;
++    InternalEvent *events = InputEventList;
++    InternalEvent *out;
++    RawDeviceEvent *raw;
++    DeviceEvent *event;
++    int prefix_events;
++    int num_events = 0;
++    int type;
++
++    if (!device || !device->enabled || !device->key || !device->focus ||
++        !device->kbdfeed || keycode < 8 || keycode > 255)
++        return;
++
++    type = is_down ? KeyPress : KeyRelease;
++
++    /*
++     * AnbryInput already ignores evdev autorepeat (value == 2), but keep the
++     * X server-side duplicate press guard for safety.
++     */
++    if (is_down && key_is_down(device, keycode, KEY_POSTED))
++        return;
++
++    out = UpdateFromMaster(events, device, DEVCHANGE_KEYBOARD_EVENT, &num_events);
++    prefix_events = num_events;
++    ms = GetTimeInMillis();
++
++    raw = &out->raw_event;
++    init_raw(device, raw, ms, type, keycode);
++    out++;
++    num_events++;
++
++    event = &out->device_event;
++    init_device_event(event, device, ms, EVENT_SOURCE_NORMAL);
++    event->detail.key = keycode;
++
++    if (is_down) {
++        event->type = ET_KeyPress;
++        set_key_down(device, keycode, KEY_POSTED);
++    }
++    else {
++        event->type = ET_KeyRelease;
++        set_key_up(device, keycode, KEY_POSTED);
++    }
++
++    out++;
++    num_events++;
++
++    if (prefix_events == 0)
++        mieqEnqueueAInputKeyPair(device, &InputEventList[0],
++                                 &InputEventList[1]);
++    else
++        queueEventList(device, InputEventList, num_events);
++}
++
+ /**
+  * Returns a set of InternalEvents for KeyPress/KeyRelease, optionally
+  * also with valuator events.
+diff --git a/include/input.h b/include/input.h
+index 2682ed9..cbed10e 100644
+--- a/include/input.h
++++ b/include/input.h
+@@ -452,6 +452,9 @@ extern _X_EXPORT void QueueKeyboardEvents(DeviceIntPtr pDev,
+                                           int type,
+                                           int key_code);
+ 
++extern _X_EXPORT void QueueAInputKey(DeviceIntPtr pDev,
++                                     int keycode, int is_down);
++
+ extern _X_EXPORT int GetProximityEvents(InternalEvent *events,
+                                         DeviceIntPtr pDev,
+                                         int type, const ValuatorMask *mask);
+diff --git a/mi/mi_priv.h b/mi/mi_priv.h
+index bfed86f..aba0c34 100644
+--- a/mi/mi_priv.h
++++ b/mi/mi_priv.h
+@@ -45,6 +45,9 @@ void mieqEnqueueAInputMotionPair(DeviceIntPtr pDev,
+ void mieqEnqueueAInputButtonPair(DeviceIntPtr pDev,
+                                  InternalEvent *raw,
+                                  InternalEvent *button);
++void mieqEnqueueAInputKeyPair(DeviceIntPtr pDev,
++                              InternalEvent *raw,
++                              InternalEvent *key);
+ void mieqSwitchScreen(DeviceIntPtr pDev, ScreenPtr pScreen, Bool set_dequeue_screen);
+ void mieqProcessDeviceEvent(DeviceIntPtr dev, InternalEvent *event, ScreenPtr screen);
+ void mieqProcessInputEvents(void);
+diff --git a/mi/mieq.c b/mi/mieq.c
+index 6e2f8ad..c9f8236 100644
+--- a/mi/mieq.c
++++ b/mi/mieq.c
+@@ -352,6 +352,34 @@ mieqEnqueueAInputButtonPair(DeviceIntPtr pDev,
+     miEventQueue.tail = (tail + 1) % miEventQueue.nevents;
+ }
+ 
++/*
++ * AnbryInput-only queue fast path for:
++ *   ET_RawKeyPress/Release followed by ET_KeyPress/Release.
++ */
++void
++mieqEnqueueAInputKeyPair(DeviceIntPtr pDev,
++                         InternalEvent *raw,
++                         InternalEvent *key)
++{
++    unsigned int tail;
++    size_t n_enqueued;
++
++    n_enqueued = mieqNumEnqueued(&miEventQueue);
++    if (n_enqueued + 2 >= miEventQueue.nevents) {
++        if (!mieqGrowQueue(&miEventQueue, miEventQueue.nevents << 1)) {
++            miEventQueue.dropped++;
++            return;
++        }
++    }
++
++    tail = miEventQueue.tail;
++    mieqEnqueueAInputSlot(pDev, raw, tail, 0);
++    tail = (tail + 1) % miEventQueue.nevents;
++
++    mieqEnqueueAInputSlot(pDev, key, tail, 0);
++    miEventQueue.tail = (tail + 1) % miEventQueue.nevents;
++}
++
+ /**
+  * Changes the screen reference events are being enqueued from.
+  * Input events are enqueued with a screen reference and dequeued and

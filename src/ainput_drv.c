@@ -58,10 +58,17 @@
  *
  * AnbryInput-specific direct motion/button path:
  *   make XSERVER_DIRECT=1
+ *
+ * More experimental direct keyboard path:
+ *   make XSERVER_DIRECT_KEYS=1
  */
 #ifdef AINPUT_XSERVER_DIRECT
 extern void QueueAInputRelativeMotion2D(DeviceIntPtr pDev, double dx, double dy);
 extern void QueueAInputButton(DeviceIntPtr pDev, int button, int is_down);
+#endif
+
+#ifdef AINPUT_XSERVER_DIRECT_KEYS
+extern void QueueAInputKey(DeviceIntPtr pDev, int keycode, int is_down);
 #endif
 
 #ifdef AINPUT_XSERVER_FAST_REL2D
@@ -69,7 +76,7 @@ extern void QueuePointerRelativeMotion2D(DeviceIntPtr pDev, double dx, double dy
 #endif
 
 #define DRIVER_NAME "ainput"
-#define DRIVER_VERSION 1.2
+#define DRIVER_VERSION 1.3
 
 #define PROP_SENSITIVITY "AInput Sensitivity"
 #define AINPUT_EVENT_BATCH 16
@@ -172,7 +179,11 @@ static inline void ainput_post_button(InputInfoPtr pInfo, int button, int is_dow
 
 static inline void ainput_post_key(InputInfoPtr pInfo, int key_code, int is_down)
 {
+#ifdef AINPUT_XSERVER_DIRECT_KEYS
+    QueueAInputKey(pInfo->dev, key_code, is_down);
+#else
     QueueKeyboardEvents(pInfo->dev, is_down ? KeyPress : KeyRelease, key_code);
+#endif
 }
 
 static void ainput_apply_sensitivity_all(float new_sens)
@@ -235,7 +246,7 @@ static int ainput_change_property(DeviceIntPtr dev, Atom property, XIPropertyVal
 
     memcpy(&new_sens, val->data, sizeof(float));
 
-    if (isnan(new_sens) || new_sens < 0.01f || new_sens > 20.0f)
+    if (!isfinite(new_sens) || new_sens < -100000.0f || new_sens > 100000.0f)
         return BadValue;
 
     ainput_apply_sensitivity_all(new_sens);

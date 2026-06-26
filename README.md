@@ -156,6 +156,7 @@ The experimental patch files are:
 
 - `patches/xlibre-relative-motion-2d-fast-path.patch` provides `QueuePointerRelativeMotion2D`
 - `patches/xlibre-ainput-direct-experimental.patch` provides `QueueAInputRelativeMotion2D` and `QueueAInputButton`
+- `patches/xlibre-ainput-direct-keys-experimental.patch` provides `QueueAInputKey` and must be applied after the direct AnbryInput patch
 
 Wheel buttons still use the normal Xorg/XLibre path so scroll behavior stays
 compatible.
@@ -180,10 +181,26 @@ XInput events.
 make XSERVER_DIRECT=1
 ```
 
+#### Direct Keyboard Path
+
+Uses an additional X server fast path (`QueueAInputKey`) for basic keyboard
+press/release events. This is more experimental than the mouse direct path and
+may affect keyboard repeat, modifiers, shortcuts, or XKB behavior.
+
+```sh
+make XSERVER_DIRECT_KEYS=1
+```
+
+It must be combined with the direct AnbryInput patch:
+
+```sh
+make XSERVER_DIRECT=1 XSERVER_DIRECT_KEYS=1
+```
+
 These options can also be combined with compiler optimizations:
 
 ```sh
-make NATIVE=1 AGGRESSIVE=1 XSERVER_DIRECT=1
+make NATIVE=1 AGGRESSIVE=1 XSERVER_DIRECT=1 XSERVER_DIRECT_KEYS=1
 ```
 
 ## Install
