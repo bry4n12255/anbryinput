@@ -146,11 +146,19 @@ make tools
 ### Build with Experimental Xorg/XLibre Patches
 
 AnbryInput can optionally use experimental Xorg/XLibre patches that provide
-faster paths for relative mouse motion.
+faster paths for relative mouse motion and ordinary mouse buttons.
 
 These patches are **not part of upstream Xorg/XLibre**. They must be applied
 when building your X server. If they are not present, simply build AnbryInput
 normally.
+
+The experimental patch files are:
+
+- `patches/xlibre-relative-motion-2d-fast-path.patch` provides `QueuePointerRelativeMotion2D`
+- `patches/xlibre-ainput-direct-experimental.patch` provides `QueueAInputRelativeMotion2D` and `QueueAInputButton`
+
+Wheel buttons still use the normal Xorg/XLibre path so scroll behavior stays
+compatible.
 
 #### Fast Relative Motion
 
@@ -161,18 +169,22 @@ generic event setup while still going through the normal Xorg input pipeline.
 make XSERVER_FAST_REL2D=1
 ```
 
-#### Direct Relative Motion
+#### Direct AnbryInput Path
 
-Uses a dedicated X server fast path (`QueueAInputRelativeMotion2D`) written
-specifically for AnbryInput. It bypasses much of the generic pointer event
-generation while still producing the expected `XI_RawMotion` and `XI_Motion`
-events.
+Uses dedicated X server fast paths (`QueueAInputRelativeMotion2D` and
+`QueueAInputButton`) written specifically for AnbryInput. It bypasses much of
+the generic pointer/button event generation while still producing the expected
+XInput events.
 
 ```sh
-make XSERVER_DIRECT_REL2D=1
+make XSERVER_DIRECT=1
 ```
 
-**They can also integrate with compiler optimizations**
+These options can also be combined with compiler optimizations:
+
+```sh
+make NATIVE=1 AGGRESSIVE=1 XSERVER_DIRECT=1
+```
 
 ## Install
 

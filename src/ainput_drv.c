@@ -48,19 +48,20 @@
 #include <linux/input.h>
 
 /*
- * Experimental Xorg/XLibre fast path.
+ * Experimental Xorg/XLibre fast paths.
  *
  * These only work with patched Xorg/XLibre servers that export the matching
- * symbol. Keep them disabled for normal builds.
+ * symbols. Keep them disabled for normal builds.
  *
- * Enable the safer fast path with:
+ * Safer relative-motion helper:
  *   make XSERVER_FAST_REL2D=1
  *
- * Enable the more aggressive direct path with:
- *   make XSERVER_DIRECT_REL2D=1
+ * AnbryInput-specific direct motion/button path:
+ *   make XSERVER_DIRECT=1
  */
-#ifdef AINPUT_XSERVER_DIRECT_REL2D
+#ifdef AINPUT_XSERVER_DIRECT
 extern void QueueAInputRelativeMotion2D(DeviceIntPtr pDev, double dx, double dy);
+extern void QueueAInputButton(DeviceIntPtr pDev, int button, int is_down);
 #endif
 
 #ifdef AINPUT_XSERVER_FAST_REL2D
@@ -68,7 +69,7 @@ extern void QueuePointerRelativeMotion2D(DeviceIntPtr pDev, double dx, double dy
 #endif
 
 #define DRIVER_NAME "ainput"
-#define DRIVER_VERSION 1.1
+#define DRIVER_VERSION 1.2
 
 #define PROP_SENSITIVITY "AInput Sensitivity"
 #define AINPUT_EVENT_BATCH 16
@@ -135,12 +136,9 @@ static void ainput_apply_sensitivity(AInputPriv *priv, float new_sens)
     ainput_update_effective_sensitivity(priv);
 }
 
-/*
-    Make sure you compiled XLibre or Xorg with the proper patches
-*/
 static inline void ainput_post_relative_motion(InputInfoPtr pInfo, double dx, double dy)
 {
-#ifdef AINPUT_XSERVER_DIRECT_REL2D
+#ifdef AINPUT_XSERVER_DIRECT
     QueueAInputRelativeMotion2D(pInfo->dev, dx, dy);
 #elif defined(AINPUT_XSERVER_FAST_REL2D)
     QueuePointerRelativeMotion2D(pInfo->dev, dx, dy);
@@ -157,6 +155,14 @@ static inline void ainput_post_relative_motion(InputInfoPtr pInfo, double dx, do
 
 static inline void ainput_post_button(InputInfoPtr pInfo, int button, int is_down)
 {
+#ifdef AINPUT_XSERVER_DIRECT
+    if (button != 4 && button != 5 && button != 6 && button != 7)
+    {
+        QueueAInputButton(pInfo->dev, button, is_down);
+        return;
+    }
+#endif
+
     ValuatorMask *mask = ((AInputPriv *)pInfo->private)->motion_mask;
 
     valuator_mask_zero(mask);
@@ -330,6 +336,7 @@ static void ainput_read_mouse(InputInfoPtr pInfo)
                 case BTN_EXTRA:  button = 9; break;
                 case BTN_TOUCH:  button = 1; break;
                 }
+
                 if (button > 0)
                     ainput_post_button(pInfo, button, ev->value != 0);
                 break;

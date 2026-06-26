@@ -1,8 +1,8 @@
 diff --git a/dix/getevents.c b/dix/getevents.c
-index b0cb3bc64..8f7b7a569 100644
+index b0cb3bc64..12fcd4c62 100644
 --- a/dix/getevents.c
 +++ b/dix/getevents.c
-@@ -1288,6 +1288,107 @@ QueuePointerEvents(DeviceIntPtr device, int type,
+@@ -1288,6 +1288,168 @@ QueuePointerEvents(DeviceIntPtr device, int type,
      queueEventList(device, InputEventList, nevents);
  }
  
@@ -107,42 +107,109 @@ index b0cb3bc64..8f7b7a569 100644
 +        queueEventList(device, InputEventList, num_events);
 +}
 +
++/*
++ * Experimental AnbryInput-only mouse button fast path.
++ *
++ * This path is meant for ordinary pointer buttons. Scroll buttons should stay
++ * on the normal Xorg/XLibre path so smooth scrolling and legacy emulation keep
++ * their usual behavior.
++ */
++void
++QueueAInputButton(DeviceIntPtr device, int button, int is_down)
++{
++    CARD32 ms = GetTimeInMillis();
++    InternalEvent *events = InputEventList;
++    InternalEvent *out;
++    RawDeviceEvent *raw;
++    DeviceEvent *event;
++    ScreenPtr scr;
++    int prefix_events;
++    int num_events = 0;
++    int type;
++
++    if (!device || !device->enabled || !device->button || !button ||
++        button >= MAX_BUTTONS)
++        return;
++
++    scr = miPointerGetScreen(device);
++    if (!scr)
++        return;
++
++    type = is_down ? ButtonPress : ButtonRelease;
++
++    out = UpdateFromMaster(events, device, DEVCHANGE_POINTER_EVENT, &num_events);
++    prefix_events = num_events;
++
++    raw = &out->raw_event;
++    init_raw(device, raw, ms, type, button);
++    out++;
++    num_events++;
++
++    event = &out->device_event;
++    init_device_event(event, device, ms, EVENT_SOURCE_NORMAL);
++    event->type = is_down ? ET_ButtonPress : ET_ButtonRelease;
++    event->detail.button = button;
++    event_set_root_coordinates(event,
++                               device->last.valuators[0] - scr->x,
++                               device->last.valuators[1] - scr->y);
++
++    if (is_down)
++        set_button_down(device, button, BUTTON_POSTED);
++    else
++        set_button_up(device, button, BUTTON_POSTED);
++
++    out++;
++    num_events++;
++
++    if (prefix_events == 0)
++        mieqEnqueueAInputButtonPair(device, &InputEventList[0],
++                                    &InputEventList[1]);
++    else
++        queueEventList(device, InputEventList, num_events);
++}
++
  /**
   * Helper function for GetPointerEvents, which only generates motion and
   * raw motion events for the slave device: does not update the master device.
 diff --git a/include/input.h b/include/input.h
-index de89ee37d..595cb4fe1 100644
+index de89ee37d..2682ed9c0 100644
 --- a/include/input.h
 +++ b/include/input.h
-@@ -437,6 +437,9 @@ extern _X_EXPORT void QueuePointerEvents(DeviceIntPtr pDev,
+@@ -437,6 +437,12 @@ extern _X_EXPORT void QueuePointerEvents(DeviceIntPtr pDev,
                                           int buttons,
                                           int flags, const ValuatorMask *mask);
  
 +extern _X_EXPORT void QueueAInputRelativeMotion2D(DeviceIntPtr pDev,
 +                                                  double dx, double dy);
 +
++extern _X_EXPORT void QueueAInputButton(DeviceIntPtr pDev,
++                                        int button, int is_down);
++
  extern _X_EXPORT int GetKeyboardEvents(InternalEvent *events,
                                         DeviceIntPtr pDev,
                                         int type,
 diff --git a/mi/mi_priv.h b/mi/mi_priv.h
-index ba52f0340..700c80673 100644
+index ba52f0340..bfed86fea 100644
 --- a/mi/mi_priv.h
 +++ b/mi/mi_priv.h
-@@ -39,6 +39,9 @@ void miStepDash(int dist, int * pDashIndex, unsigned char * pDash,
+@@ -39,6 +39,12 @@ void miStepDash(int dist, int * pDashIndex, unsigned char * pDash,
  Bool mieqInit(void);
  void mieqFini(void);
  void mieqEnqueue(DeviceIntPtr pDev, InternalEvent *e);
 +void mieqEnqueueAInputMotionPair(DeviceIntPtr pDev,
 +                                 InternalEvent *raw,
 +                                 InternalEvent *motion);
++void mieqEnqueueAInputButtonPair(DeviceIntPtr pDev,
++                                 InternalEvent *raw,
++                                 InternalEvent *button);
  void mieqSwitchScreen(DeviceIntPtr pDev, ScreenPtr pScreen, Bool set_dequeue_screen);
  void mieqProcessDeviceEvent(DeviceIntPtr dev, InternalEvent *event, ScreenPtr screen);
  void mieqProcessInputEvents(void);
 diff --git a/mi/mieq.c b/mi/mieq.c
-index 96e318309..9c1594cbb 100644
+index 96e318309..6e2f8ada5 100644
 --- a/mi/mieq.c
 +++ b/mi/mieq.c
-@@ -272,6 +272,58 @@ mieqEnqueue(DeviceIntPtr pDev, InternalEvent *e)
+@@ -272,6 +272,86 @@ mieqEnqueue(DeviceIntPtr pDev, InternalEvent *e)
      miEventQueue.tail = (oldtail + 1) % miEventQueue.nevents;
  }
  
@@ -195,6 +262,34 @@ index 96e318309..9c1594cbb 100644
 +    tail = (tail + 1) % miEventQueue.nevents;
 +
 +    mieqEnqueueAInputSlot(pDev, motion, tail, pDev ? pDev->id : 0);
++    miEventQueue.tail = (tail + 1) % miEventQueue.nevents;
++}
++
++/*
++ * AnbryInput-only queue fast path for:
++ *   ET_RawButtonPress/Release followed by ET_ButtonPress/Release.
++ */
++void
++mieqEnqueueAInputButtonPair(DeviceIntPtr pDev,
++                            InternalEvent *raw,
++                            InternalEvent *button)
++{
++    unsigned int tail;
++    size_t n_enqueued;
++
++    n_enqueued = mieqNumEnqueued(&miEventQueue);
++    if (n_enqueued + 2 >= miEventQueue.nevents) {
++        if (!mieqGrowQueue(&miEventQueue, miEventQueue.nevents << 1)) {
++            miEventQueue.dropped++;
++            return;
++        }
++    }
++
++    tail = miEventQueue.tail;
++    mieqEnqueueAInputSlot(pDev, raw, tail, 0);
++    tail = (tail + 1) % miEventQueue.nevents;
++
++    mieqEnqueueAInputSlot(pDev, button, tail, 0);
 +    miEventQueue.tail = (tail + 1) % miEventQueue.nevents;
 +}
 +
