@@ -56,18 +56,12 @@
  * Safer relative-motion helper:
  *   make XSERVER_FAST_REL2D=1
  *
- * AnbryInput-specific direct motion/button path:
+ * AnbryInput-specific direct motion/button/key path:
  *   make XSERVER_DIRECT=1
- *
- * More experimental direct keyboard path:
- *   make XSERVER_DIRECT_KEYS=1
  */
 #ifdef AINPUT_XSERVER_DIRECT
 extern void QueueAInputRelativeMotion2D(DeviceIntPtr pDev, double dx, double dy);
 extern void QueueAInputButton(DeviceIntPtr pDev, int button, int is_down);
-#endif
-
-#ifdef AINPUT_XSERVER_DIRECT_KEYS
 extern void QueueAInputKey(DeviceIntPtr pDev, int keycode, int is_down);
 #endif
 
@@ -76,7 +70,7 @@ extern void QueuePointerRelativeMotion2D(DeviceIntPtr pDev, double dx, double dy
 #endif
 
 #define DRIVER_NAME "ainput"
-#define DRIVER_VERSION 1.3
+#define DRIVER_VERSION 1.4
 
 #define PROP_SENSITIVITY "AInput Sensitivity"
 #define AINPUT_EVENT_BATCH 16
@@ -179,7 +173,7 @@ static inline void ainput_post_button(InputInfoPtr pInfo, int button, int is_dow
 
 static inline void ainput_post_key(InputInfoPtr pInfo, int key_code, int is_down)
 {
-#ifdef AINPUT_XSERVER_DIRECT_KEYS
+#ifdef AINPUT_XSERVER_DIRECT
     QueueAInputKey(pInfo->dev, key_code, is_down);
 #else
     QueueKeyboardEvents(pInfo->dev, is_down ? KeyPress : KeyRelease, key_code);
@@ -189,10 +183,10 @@ static inline void ainput_post_key(InputInfoPtr pInfo, int key_code, int is_down
 static void ainput_apply_sensitivity_all(float new_sens)
 {
     InputInfoPtr pInfo;
+    AInputPriv *priv;
 
     for (pInfo = xf86FirstLocalDevice(); pInfo; pInfo = pInfo->next)
     {
-        AInputPriv *priv;
 
         if (!pInfo->drv || !pInfo->drv->driverName ||
             strcmp(pInfo->drv->driverName, DRIVER_NAME) != 0 ||

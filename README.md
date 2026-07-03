@@ -155,8 +155,8 @@ normally.
 The experimental patch files are:
 
 - `patches/xlibre-relative-motion-2d-fast-path.patch` provides `QueuePointerRelativeMotion2D`
-- `patches/xlibre-ainput-direct-experimental.patch` provides `QueueAInputRelativeMotion2D` and `QueueAInputButton`
-- `patches/xlibre-ainput-direct-keys-experimental.patch` provides `QueueAInputKey` and must be applied after the direct AnbryInput patch
+- `patches/xlibre-ainput-direct-experimental.patch` provides `QueueAInputRelativeMotion2D`, `QueueAInputButton`, `QueueAInputKey`, and AInput-specific XI2 event conversion helpers
+- `patches/xorg-ainput-direct-experimental.patch` provides `QueueAInputRelativeMotion2D`, `QueueAInputButton`, `QueueAInputKey`, and AInput-specific XI2 event conversion helpers
 
 Wheel buttons still use the normal Xorg/XLibre path so scroll behavior stays
 compatible.
@@ -172,35 +172,23 @@ make XSERVER_FAST_REL2D=1
 
 #### Direct AnbryInput Path
 
-Uses dedicated X server fast paths (`QueueAInputRelativeMotion2D` and
-`QueueAInputButton`) written specifically for AnbryInput. It bypasses much of
-the generic pointer/button event generation while still producing the expected
-XInput events.
+Uses dedicated X server fast paths (`QueueAInputRelativeMotion2D`,
+`QueueAInputButton`, and `QueueAInputKey`) written specifically for AnbryInput.
+It bypasses much of the generic pointer/button/key event generation while still
+producing the expected XInput events. The patch also includes narrow XI2
+conversion helpers for AInput raw/device motion, button, and key events.
 
 ```sh
 make XSERVER_DIRECT=1
 ```
 
-#### Direct Keyboard Path
-
-Uses an additional X server fast path (`QueueAInputKey`) for basic keyboard
-press/release events. This is more experimental than the mouse direct path and
-may affect keyboard repeat, modifiers, shortcuts, or XKB behavior.
-
-```sh
-make XSERVER_DIRECT_KEYS=1
-```
-
-It must be combined with the direct AnbryInput patch:
-
-```sh
-make XSERVER_DIRECT=1 XSERVER_DIRECT_KEYS=1
-```
+The keyboard part is more experimental than the mouse path and may affect
+keyboard repeat, modifiers, shortcuts, or XKB behavior.
 
 These options can also be combined with compiler optimizations:
 
 ```sh
-make NATIVE=1 AGGRESSIVE=1 XSERVER_DIRECT=1 XSERVER_DIRECT_KEYS=1
+make NATIVE=1 AGGRESSIVE=1 XSERVER_DIRECT=1
 ```
 
 ## Install

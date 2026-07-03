@@ -1,16 +1,16 @@
 diff --git a/dix/eventconvert.c b/dix/eventconvert.c
-index 1b6bf55..e7946e8 100644
+index 8e830c5..bbcca35 100644
 --- a/dix/eventconvert.c
 +++ b/dix/eventconvert.c
-@@ -31,6 +31,7 @@
- #include <dix-config.h>
+@@ -33,6 +33,7 @@
+ #endif
 
  #include <stdint.h>
 +#include <math.h>
  #include <X11/X.h>
  #include <X11/extensions/XIproto.h>
  #include <X11/extensions/XI2proto.h>
-@@ -58,6 +59,8 @@ static int eventToKeyButtonPointer(DeviceEvent *ev, xEvent **xi, int *count);
+@@ -57,6 +58,8 @@ static int eventToKeyButtonPointer(DeviceEvent *ev, xEvent **xi, int *count);
  static int eventToDeviceChanged(DeviceChangedEvent *ev, xEvent **dcce);
  static int eventToDeviceEvent(DeviceEvent *ev, xEvent **xi);
  static int eventToRawEvent(RawDeviceEvent *ev, xEvent **xi);
@@ -19,7 +19,7 @@ index 1b6bf55..e7946e8 100644
  static int eventToBarrierEvent(BarrierEvent *ev, xEvent **xi);
  static int eventToTouchOwnershipEvent(TouchOwnershipEvent *ev, xEvent **xi);
  static int eventToGestureSwipeEvent(GestureEvent *ev, xEvent **xi);
-@@ -279,6 +282,8 @@ EventToXI2(InternalEvent *ev, xEvent **xi)
+@@ -278,6 +281,8 @@ EventToXI2(InternalEvent *ev, xEvent **xi)
      case ET_TouchBegin:
      case ET_TouchUpdate:
      case ET_TouchEnd:
@@ -28,7 +28,7 @@ index 1b6bf55..e7946e8 100644
          return eventToDeviceEvent(&ev->device_event, xi);
      case ET_TouchOwnership:
          return eventToTouchOwnershipEvent(&ev->touch_ownership_event, xi);
-@@ -296,6 +301,8 @@ EventToXI2(InternalEvent *ev, xEvent **xi)
+@@ -295,6 +300,8 @@ EventToXI2(InternalEvent *ev, xEvent **xi)
      case ET_RawTouchBegin:
      case ET_RawTouchUpdate:
      case ET_RawTouchEnd:
@@ -37,7 +37,7 @@ index 1b6bf55..e7946e8 100644
          return eventToRawEvent(&ev->raw_event, xi);
      case ET_BarrierHit:
      case ET_BarrierLeave:
-@@ -747,6 +754,158 @@ eventToDeviceEvent(DeviceEvent *ev, xEvent **xi)
+@@ -746,6 +753,158 @@ eventToDeviceEvent(DeviceEvent *ev, xEvent **xi)
      return Success;
  }
 
@@ -98,7 +98,7 @@ index 1b6bf55..e7946e8 100644
 +    xde = (xXIDeviceEvent *) *xi;
 +    memset(xde, 0, sizeof(*xde));
 +    xde->type = GenericEvent;
-+    xde->extension = EXTENSION_MAJOR_XINPUT;
++    xde->extension = IReqCode;
 +    xde->evtype = GetXI2Type(ev->type);
 +    xde->time = ev->time;
 +    xde->length = bytes_to_int32(len - sizeof(xEvent));
@@ -166,7 +166,7 @@ index 1b6bf55..e7946e8 100644
 +    raw = (xXIRawEvent *) *xi;
 +    memset(raw, 0, sizeof(*raw));
 +    raw->type = GenericEvent;
-+    raw->extension = EXTENSION_MAJOR_XINPUT;
++    raw->extension = IReqCode;
 +    raw->evtype = GetXI2Type(ev->type);
 +    raw->time = ev->time;
 +    raw->length = bytes_to_int32(len - sizeof(xEvent));
@@ -197,10 +197,10 @@ index 1b6bf55..e7946e8 100644
  eventToTouchOwnershipEvent(TouchOwnershipEvent *ev, xEvent **xi)
  {
 diff --git a/dix/getevents.c b/dix/getevents.c
-index b0cb3bc..3d91747 100644
+index 32bafe2..0bf0ac8 100644
 --- a/dix/getevents.c
 +++ b/dix/getevents.c
-@@ -1049,6 +1049,73 @@ QueueKeyboardEvents(DeviceIntPtr device, int type,
+@@ -1052,6 +1052,69 @@ QueueKeyboardEvents(DeviceIntPtr device, int type,
      queueEventList(device, InputEventList, nevents);
  }
 
@@ -229,10 +229,6 @@ index b0cb3bc..3d91747 100644
 +
 +    type = is_down ? KeyPress : KeyRelease;
 +
-+    /*
-+     * AnbryInput already ignores evdev autorepeat (value == 2), but keep the
-+     * X server-side duplicate press guard for safety.
-+     */
 +    if (is_down && key_is_down(device, keycode, KEY_POSTED))
 +        return;
 +
@@ -274,25 +270,12 @@ index b0cb3bc..3d91747 100644
  /**
   * Returns a set of InternalEvents for KeyPress/KeyRelease, optionally
   * also with valuator events.
-@@ -1288,6 +1355,172 @@ QueuePointerEvents(DeviceIntPtr device, int type,
+@@ -1292,6 +1355,155 @@ QueuePointerEvents(DeviceIntPtr device, int type,
      queueEventList(device, InputEventList, nevents);
  }
 
 +/*
 + * Experimental AnbryInput-only relative 2D fast path.
-+ *
-+ * This intentionally supports only the narrow contract AnbryInput needs:
-+ * relative mouse motion on axes 0/1, no acceleration, no scroll emulation,
-+ * no absolute/tablet/touchpad handling, and no generic valuator traversal.
-+ *
-+ * It still preserves the externally important pieces:
-+ * - XI_RawMotion
-+ * - XI_Motion/core pointer motion
-+ * - sprite movement, clipping, barriers, and screen crossing through
-+ *   miPointerSetPosition()
-+ * - master pointer last coordinates
-+ *
-+ * Drivers must only call this for simple relative pointer motion.
 + */
 +void
 +QueueAInputRelativeMotion2D(DeviceIntPtr device, double dx, double dy)
@@ -353,7 +336,7 @@ index b0cb3bc..3d91747 100644
 +    device->last.valuators[0] = screenx;
 +    device->last.valuators[1] = screeny;
 +
-+    if (!InputDevIsMaster(device) && !InputDevIsFloating(device)) {
++    if (!IsMaster(device) && !IsFloating(device)) {
 +        master = GetMaster(device, MASTER_POINTER);
 +        if (master) {
 +            master->last.valuators[0] = screenx;
@@ -383,10 +366,6 @@ index b0cb3bc..3d91747 100644
 +
 +/*
 + * Experimental AnbryInput-only mouse button fast path.
-+ *
-+ * This path is meant for ordinary pointer buttons. Scroll buttons should stay
-+ * on the normal Xorg/XLibre path so smooth scrolling and legacy emulation keep
-+ * their usual behavior.
 + */
 +void
 +QueueAInputButton(DeviceIntPtr device, int button, int is_down)
@@ -462,10 +441,10 @@ index a9926ea..a23285f 100644
   * Used for ALL input device events internal in the server until
   * copied into the matching protocol event.
 diff --git a/include/input.h b/include/input.h
-index de89ee3..2710476 100644
+index cdb5d5a..78f30dd 100644
 --- a/include/input.h
 +++ b/include/input.h
-@@ -437,6 +437,12 @@ extern _X_EXPORT void QueuePointerEvents(DeviceIntPtr pDev,
+@@ -476,6 +476,12 @@ extern _X_EXPORT void QueuePointerEvents(DeviceIntPtr pDev,
                                           int buttons,
                                           int flags, const ValuatorMask *mask);
 
@@ -478,41 +457,42 @@ index de89ee3..2710476 100644
  extern _X_EXPORT int GetKeyboardEvents(InternalEvent *events,
                                         DeviceIntPtr pDev,
                                         int type,
-@@ -446,6 +452,9 @@ extern _X_EXPORT void QueueKeyboardEvents(DeviceIntPtr pDev,
+@@ -485,6 +491,9 @@ extern _X_EXPORT void QueueKeyboardEvents(DeviceIntPtr pDev,
                                            int type,
                                            int key_code);
 
 +extern _X_EXPORT void QueueAInputKey(DeviceIntPtr pDev,
 +                                     int keycode, int is_down);
 +
- extern _X_EXPORT int GetProximityEvents(InternalEvent *events,
-                                         DeviceIntPtr pDev,
-                                         int type, const ValuatorMask *mask);
-diff --git a/mi/mi_priv.h b/mi/mi_priv.h
-index ba52f03..aba0c34 100644
---- a/mi/mi_priv.h
-+++ b/mi/mi_priv.h
-@@ -39,6 +39,15 @@ void miStepDash(int dist, int * pDashIndex, unsigned char * pDash,
- Bool mieqInit(void);
- void mieqFini(void);
- void mieqEnqueue(DeviceIntPtr pDev, InternalEvent *e);
-+void mieqEnqueueAInputMotionPair(DeviceIntPtr pDev,
-+                                 InternalEvent *raw,
-+                                 InternalEvent *motion);
-+void mieqEnqueueAInputButtonPair(DeviceIntPtr pDev,
-+                                 InternalEvent *raw,
-+                                 InternalEvent *button);
-+void mieqEnqueueAInputKeyPair(DeviceIntPtr pDev,
-+                              InternalEvent *raw,
-+                              InternalEvent *key);
- void mieqSwitchScreen(DeviceIntPtr pDev, ScreenPtr pScreen, Bool set_dequeue_screen);
- void mieqProcessDeviceEvent(DeviceIntPtr dev, InternalEvent *event, ScreenPtr screen);
- void mieqProcessInputEvents(void);
+ extern int GetTouchEvents(InternalEvent *events,
+                           DeviceIntPtr pDev,
+                           uint32_t ddx_touchid,
+diff --git a/mi/mi.h b/mi/mi.h
+index 8b0a231..29bcf81 100644
+--- a/mi/mi.h
++++ b/mi/mi.h
+@@ -192,6 +192,16 @@ extern _X_EXPORT void mieqEnqueue(DeviceIntPtr /*pDev */ ,
+                                   InternalEvent *       /*e */
+     );
+
++extern _X_EXPORT void mieqEnqueueAInputMotionPair(DeviceIntPtr /*pDev */,
++                                                  InternalEvent * /*raw */,
++                                                  InternalEvent * /*motion */);
++extern _X_EXPORT void mieqEnqueueAInputButtonPair(DeviceIntPtr /*pDev */,
++                                                  InternalEvent * /*raw */,
++                                                  InternalEvent * /*button */);
++extern _X_EXPORT void mieqEnqueueAInputKeyPair(DeviceIntPtr /*pDev */,
++                                               InternalEvent * /*raw */,
++                                               InternalEvent * /*key */);
++
+ extern _X_EXPORT void mieqSwitchScreen(DeviceIntPtr /* pDev */ ,
+                                        ScreenPtr /*pScreen */ ,
+                                        Bool     /*set_dequeue_screen */
 diff --git a/mi/mieq.c b/mi/mieq.c
-index 96e3183..0d71fb5 100644
+index c98d468..617028f 100644
 --- a/mi/mieq.c
 +++ b/mi/mieq.c
-@@ -272,6 +272,114 @@ mieqEnqueue(DeviceIntPtr pDev, InternalEvent *e)
+@@ -267,6 +267,98 @@ mieqEnqueue(DeviceIntPtr pDev, InternalEvent *e)
      miEventQueue.tail = (oldtail + 1) % miEventQueue.nevents;
  }
 
@@ -536,14 +516,6 @@ index 96e3183..0d71fb5 100644
 +    miEventQueue.lastMotion = isMotion;
 +}
 +
-+/*
-+ * AnbryInput-only queue fast path for the common pair:
-+ *   ET_RawMotion followed by ET_Motion for the same device.
-+ *
-+ * This intentionally skips generic verification and per-event branching used
-+ * by mieqEnqueue(). It must only be used by code that has already built these
-+ * two exact event types and still wants normal mieq delivery semantics.
-+ */
 +void
 +mieqEnqueueAInputMotionPair(DeviceIntPtr pDev,
 +                            InternalEvent *raw,
@@ -568,10 +540,6 @@ index 96e3183..0d71fb5 100644
 +    miEventQueue.tail = (tail + 1) % miEventQueue.nevents;
 +}
 +
-+/*
-+ * AnbryInput-only queue fast path for:
-+ *   ET_RawButtonPress/Release followed by ET_ButtonPress/Release.
-+ */
 +void
 +mieqEnqueueAInputButtonPair(DeviceIntPtr pDev,
 +                            InternalEvent *raw,
@@ -596,10 +564,6 @@ index 96e3183..0d71fb5 100644
 +    miEventQueue.tail = (tail + 1) % miEventQueue.nevents;
 +}
 +
-+/*
-+ * AnbryInput-only queue fast path for:
-+ *   ET_RawKeyPress/Release followed by ET_KeyPress/Release.
-+ */
 +void
 +mieqEnqueueAInputKeyPair(DeviceIntPtr pDev,
 +                         InternalEvent *raw,
