@@ -2,7 +2,7 @@ diff --git a/dix/getevents.c b/dix/getevents.c
 index b0cb3bc64..84abf80e8 100644
 --- a/dix/getevents.c
 +++ b/dix/getevents.c
-@@ -1262,8 +1262,28 @@ storeLastValuators(DeviceIntPtr dev, ValuatorMask *mask, double devx, double dev
+@@ -1262,8 +1262,26 @@ storeLastValuators(DeviceIntPtr dev, ValuatorMask *mask, double devx, double dev
              dev->last.valuators[i] = valuator_mask_get_double(mask, i);
      }
  
@@ -10,16 +10,14 @@ index b0cb3bc64..84abf80e8 100644
  }
  
 +void
-+QueuePointerRelativeMotion2D(DeviceIntPtr device, double dx, double dy)
++QueuePointerRelativeMotion2D(DeviceIntPtr device, double dx, double dy,
++                             double raw_dx, double raw_dy)
 +{
 +    int nevents;
 +    ValuatorMask mask = {0};
 +
-+    mask.last_bit = 1;
-+    mask.has_unaccelerated = 0;
-+    mask.mask[0] = 0x3;
-+    mask.valuators[0] = dx;
-+    mask.valuators[1] = dy;
++    valuator_mask_set_unaccelerated(&mask, 0, dx, raw_dx);
++    valuator_mask_set_unaccelerated(&mask, 1, dy, raw_dy);
 +
 +    nevents = GetPointerEvents(InputEventList, device, MotionNotify, 0,
 +                               POINTER_RELATIVE, &mask);
@@ -35,12 +33,13 @@ diff --git a/include/input.h b/include/input.h
 index de89ee37d..0f4a43002 100644
 --- a/include/input.h
 +++ b/include/input.h
-@@ -437,6 +437,9 @@ extern _X_EXPORT void QueuePointerEvents(DeviceIntPtr pDev,
+@@ -437,6 +437,10 @@ extern _X_EXPORT void QueuePointerEvents(DeviceIntPtr pDev,
                                           int buttons,
                                           int flags, const ValuatorMask *mask);
  
 +extern _X_EXPORT void QueuePointerRelativeMotion2D(DeviceIntPtr pDev,
-+                                                   double dx, double dy);
++                                                   double dx, double dy,
++                                                   double raw_dx, double raw_dy);
 +
  extern _X_EXPORT int GetKeyboardEvents(InternalEvent *events,
                                         DeviceIntPtr pDev,

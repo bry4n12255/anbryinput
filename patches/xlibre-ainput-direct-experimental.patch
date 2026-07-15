@@ -274,7 +274,7 @@ index b0cb3bc..3d91747 100644
  /**
   * Returns a set of InternalEvents for KeyPress/KeyRelease, optionally
   * also with valuator events.
-@@ -1288,6 +1355,172 @@ QueuePointerEvents(DeviceIntPtr device, int type,
+@@ -1288,6 +1355,173 @@ QueuePointerEvents(DeviceIntPtr device, int type,
      queueEventList(device, InputEventList, nevents);
  }
 
@@ -295,7 +295,8 @@ index b0cb3bc..3d91747 100644
 + * Drivers must only call this for simple relative pointer motion.
 + */
 +void
-+QueueAInputRelativeMotion2D(DeviceIntPtr device, double dx, double dy)
++QueueAInputRelativeMotion2DRaw(DeviceIntPtr device, double dx, double dy,
++                               double raw_dx, double raw_dy)
 +{
 +    CARD32 ms = GetTimeInMillis();
 +    InternalEvent *events = InputEventList;
@@ -326,10 +327,10 @@ index b0cb3bc..3d91747 100644
 +    init_raw(device, raw, ms, MotionNotify, 0);
 +    SetBit(raw->valuators.mask, 0);
 +    SetBit(raw->valuators.mask, 1);
-+    raw->valuators.data_raw[0] = dx;
-+    raw->valuators.data_raw[1] = dy;
-+    raw->valuators.data[0] = dx;
-+    raw->valuators.data[1] = dy;
++    raw->valuators.data_raw[0] = raw_dx;
++    raw->valuators.data_raw[1] = raw_dy;
++    raw->valuators.data[0] = raw_dx;
++    raw->valuators.data[1] = raw_dy;
 +    raw->flags = AINPUT_FAST_EVENT;
 +    out++;
 +    num_events++;
@@ -465,12 +466,13 @@ diff --git a/include/input.h b/include/input.h
 index de89ee3..2710476 100644
 --- a/include/input.h
 +++ b/include/input.h
-@@ -437,6 +437,12 @@ extern _X_EXPORT void QueuePointerEvents(DeviceIntPtr pDev,
+@@ -437,6 +437,13 @@ extern _X_EXPORT void QueuePointerEvents(DeviceIntPtr pDev,
                                           int buttons,
                                           int flags, const ValuatorMask *mask);
 
-+extern _X_EXPORT void QueueAInputRelativeMotion2D(DeviceIntPtr pDev,
-+                                                  double dx, double dy);
++extern _X_EXPORT void QueueAInputRelativeMotion2DRaw(DeviceIntPtr pDev,
++                                                     double dx, double dy,
++                                                     double raw_dx, double raw_dy);
 +
 +extern _X_EXPORT void QueueAInputButton(DeviceIntPtr pDev,
 +                                        int button, int is_down);

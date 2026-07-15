@@ -60,17 +60,21 @@
  *   make XSERVER_DIRECT=1
  */
 #ifdef AINPUT_XSERVER_DIRECT
-extern void QueueAInputRelativeMotion2D(DeviceIntPtr pDev, double dx, double dy);
+extern void QueueAInputRelativeMotion2DRaw(DeviceIntPtr pDev,
+                                           double dx, double dy,
+                                           double raw_dx, double raw_dy);
 extern void QueueAInputButton(DeviceIntPtr pDev, int button, int is_down);
 extern void QueueAInputKey(DeviceIntPtr pDev, int keycode, int is_down);
 #endif
 
 #ifdef AINPUT_XSERVER_FAST_REL2D
-extern void QueuePointerRelativeMotion2D(DeviceIntPtr pDev, double dx, double dy);
+extern void QueuePointerRelativeMotion2D(DeviceIntPtr pDev,
+                                         double dx, double dy,
+                                         double raw_dx, double raw_dy);
 #endif
 
 #define DRIVER_NAME "ainput"
-#define DRIVER_VERSION 1.4
+#define DRIVER_VERSION 1.5
 
 #define PROP_SENSITIVITY "AInput Sensitivity"
 #define AINPUT_EVENT_BATCH 16
@@ -137,18 +141,20 @@ static void ainput_apply_sensitivity(AInputPriv *priv, float new_sens)
     ainput_update_effective_sensitivity(priv);
 }
 
-static inline void ainput_post_relative_motion(InputInfoPtr pInfo, double dx, double dy)
+static inline void ainput_post_relative_motion(InputInfoPtr pInfo,
+                                               double dx, double dy,
+                                               double raw_dx, double raw_dy)
 {
 #ifdef AINPUT_XSERVER_DIRECT
-    QueueAInputRelativeMotion2D(pInfo->dev, dx, dy);
+    QueueAInputRelativeMotion2DRaw(pInfo->dev, dx, dy, raw_dx, raw_dy);
 #elif defined(AINPUT_XSERVER_FAST_REL2D)
-    QueuePointerRelativeMotion2D(pInfo->dev, dx, dy);
+    QueuePointerRelativeMotion2D(pInfo->dev, dx, dy, raw_dx, raw_dy);
 #else
     ValuatorMask *mask = ((AInputPriv *)pInfo->private)->motion_mask;
 
     valuator_mask_zero(mask);
-    valuator_mask_set_double(mask, 0, dx);
-    valuator_mask_set_double(mask, 1, dy);
+    valuator_mask_set_unaccelerated(mask, 0, dx, raw_dx);
+    valuator_mask_set_unaccelerated(mask, 1, dy, raw_dy);
 
     QueuePointerEvents(pInfo->dev, MotionNotify, 0, POINTER_RELATIVE, mask);
 #endif
@@ -358,7 +364,9 @@ static void ainput_read_mouse(InputInfoPtr pInfo)
                     double dx = (double)priv->acc_x * sens;
                     double dy = (double)priv->acc_y * sens;
 
-                    ainput_post_relative_motion(pInfo, dx, dy);
+                    ainput_post_relative_motion(pInfo, dx, dy,
+                                                (double)priv->acc_x,
+                                                (double)priv->acc_y);
 
                     priv->acc_x = 0;
                     priv->acc_y = 0;
@@ -390,7 +398,9 @@ static void ainput_read_mouse(InputInfoPtr pInfo)
                     double step_x = (double)delta_x * sens;
                     double step_y = (double)delta_y * sens;
 
-                    ainput_post_relative_motion(pInfo, step_x, step_y);
+                    ainput_post_relative_motion(pInfo, step_x, step_y,
+                                                (double)delta_x,
+                                                (double)delta_y);
 
                     priv->has_abs_event = 0;
                 }

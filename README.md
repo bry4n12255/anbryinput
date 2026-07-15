@@ -155,8 +155,8 @@ normally.
 The experimental patch files are:
 
 - `patches/xlibre-relative-motion-2d-fast-path.patch` provides `QueuePointerRelativeMotion2D`
-- `patches/xlibre-ainput-direct-experimental.patch` provides `QueueAInputRelativeMotion2D`, `QueueAInputButton`, `QueueAInputKey`, and AInput-specific XI2 event conversion helpers
-- `patches/xorg-ainput-direct-experimental.patch` provides `QueueAInputRelativeMotion2D`, `QueueAInputButton`, `QueueAInputKey`, and AInput-specific XI2 event conversion helpers
+- `patches/xlibre-ainput-direct-experimental.patch` provides `QueueAInputRelativeMotion2DRaw`, `QueueAInputButton`, `QueueAInputKey`, and AInput-specific XI2 event conversion helpers
+- `patches/xorg-ainput-direct-experimental.patch` provides `QueueAInputRelativeMotion2DRaw`, `QueueAInputButton`, `QueueAInputKey`, and AInput-specific XI2 event conversion helpers
 
 Wheel buttons still use the normal Xorg/XLibre path so scroll behavior stays
 compatible.
@@ -172,7 +172,7 @@ make XSERVER_FAST_REL2D=1
 
 #### Direct AnbryInput Path
 
-Uses dedicated X server fast paths (`QueueAInputRelativeMotion2D`,
+Uses dedicated X server fast paths (`QueueAInputRelativeMotion2DRaw`,
 `QueueAInputButton`, and `QueueAInputKey`) written specifically for AnbryInput.
 It bypasses much of the generic pointer/button/key event generation while still
 producing the expected XInput events. The patch also includes narrow XI2
@@ -278,6 +278,12 @@ AnbryInput applies a simple linear multiplier:
 ```text
 effective = Sensitivity * (ReferenceDPI / DPI)
 ```
+
+The multiplier is applied to normal pointer motion only. `XI_RawMotion`
+retains the original hardware counts, so games can apply their own fractional
+sensitivity without receiving sub-count deltas that some engines truncate to
+zero. Consequently, games using raw input are not affected by AnbryInput's
+`Sensitivity`, `DPI`, or `ReferenceDPI` settings.
 
 For example:
 
