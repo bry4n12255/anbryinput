@@ -3,8 +3,8 @@
 AnbryInput is a small experimental Xorg/XLibre input driver focused on
 low-latency mouse and keyboard input. The Xorg driver module is named `ainput`.
 
-It is not a full libinput replacement. It intentionally does less work: no
-touchpad gestures, no tablet handling, no adaptive acceleration pipeline, and no
+It is not a full libinput replacement. It intentionally does less work:
+no touchpad gestures, no tablet handling, no adaptive acceleration pipeline, and no
 Wayland support for now. The goal is a short, predictable path from Linux evdev
 to Xorg.
 
@@ -37,6 +37,10 @@ Current tested setup:
 
 - XLibre `25.0.0.22`
 - XInput driver ABI `26.0`
+
+Also:
+- XOrg `1.21.1.24`
+- XInput driver ABI `24.4`
 
 Check your local input ABI with:
 
@@ -155,8 +159,8 @@ normally.
 The experimental patch files are:
 
 - `patches/xlibre-relative-motion-2d-fast-path.patch` provides `QueuePointerRelativeMotion2D`
-- `patches/xlibre-ainput-direct-experimental.patch` provides `QueueAInputRelativeMotion2DRaw`, `QueueAInputButton`, `QueueAInputKey`, and AInput-specific XI2 event conversion helpers
-- `patches/xorg-ainput-direct-experimental.patch` provides `QueueAInputRelativeMotion2DRaw`, `QueueAInputButton`, `QueueAInputKey`, and AInput-specific XI2 event conversion helpers
+- `patches/xlibre-ainput-direct-experimental.patch` provides `QueueAInputRelativeMotion2DRawTimed` and `QueueAInputButton`
+- `patches/xorg-ainput-direct-experimental.patch` provides `QueueAInputRelativeMotion2DRawTimed` and `QueueAInputButton`
 
 Wheel buttons still use the normal Xorg/XLibre path so scroll behavior stays
 compatible.
@@ -172,18 +176,17 @@ make XSERVER_FAST_REL2D=1
 
 #### Direct AnbryInput Path
 
-Uses dedicated X server fast paths (`QueueAInputRelativeMotion2DRaw`,
-`QueueAInputButton`, and `QueueAInputKey`) written specifically for AnbryInput.
-It bypasses much of the generic pointer/button/key event generation while still
-producing the expected XInput events. The patch also includes narrow XI2
-conversion helpers for AInput raw/device motion, button, and key events.
+Uses dedicated X server fast paths (`QueueAInputRelativeMotion2DRawTimed`
+and `QueueAInputButton`) written specifically for AnbryInput. It bypasses much
+of the generic pointer/button event generation while still producing the
+expected XInput events. Keyboard events intentionally remain on the server's
+validated `QueueKeyboardEvents` path because their low event rate does not
+justify bypassing queue validation. Direct events still use the server's
+standard XI2 wire conversion for compatibility with all clients.
 
 ```sh
 make XSERVER_DIRECT=1
 ```
-
-The keyboard part is more experimental than the mouse path and may affect
-keyboard repeat, modifiers, shortcuts, or XKB behavior.
 
 These options can also be combined with compiler optimizations:
 
@@ -197,6 +200,18 @@ Install the driver into the Xorg/XLibre input module directory:
 
 ```sh
 sudo make install
+```
+
+or
+
+```sh
+sudo make NATIVE=1 XSERVER_DIRECT=1 install
+```
+
+or
+
+```sh
+sudo make NATIVE=1 AGGRESSIVE=1 XSERVER_DIRECT=1 install
 ```
 
 Restart Xorg/XLibre after installing. Input drivers are loaded into the server

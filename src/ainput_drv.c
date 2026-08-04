@@ -19,6 +19,7 @@
 #include <strings.h>
 #include <errno.h>
 #include <math.h>
+#include <time.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -60,11 +61,11 @@
  *   make XSERVER_DIRECT=1
  */
 #ifdef AINPUT_XSERVER_DIRECT
-extern void QueueAInputRelativeMotion2DRaw(DeviceIntPtr pDev,
-                                           double dx, double dy,
-                                           double raw_dx, double raw_dy);
+extern void QueueAInputRelativeMotion2DRawTimed(DeviceIntPtr pDev,
+                                                double dx, double dy,
+                                                double raw_dx, double raw_dy,
+                                                uint32_t time_ms);
 extern void QueueAInputButton(DeviceIntPtr pDev, int button, int is_down);
-extern void QueueAInputKey(DeviceIntPtr pDev, int keycode, int is_down);
 #endif
 
 #ifdef AINPUT_XSERVER_FAST_REL2D
@@ -74,10 +75,10 @@ extern void QueuePointerRelativeMotion2D(DeviceIntPtr pDev,
 #endif
 
 #define DRIVER_NAME "ainput"
-#define DRIVER_VERSION 1.5
+#define DRIVER_VERSION 1.6
 
 #define PROP_SENSITIVITY "AInput Sensitivity"
-#define AINPUT_EVENT_BATCH 16
+#define AINPUT_EVENT_BATCH 64
 #define AINPUT_DEFAULT_SENSITIVITY 1.0f
 #define AINPUT_DEFAULT_DPI 1000.0f
 #define AINPUT_DEFAULT_LAYOUT "us"
@@ -89,6 +90,10 @@ extern void QueuePointerRelativeMotion2D(DeviceIntPtr pDev,
 #define NBITS(x) ((x) / BITS_PER_LONG + 1)
 #define BIT_IS_SET(arr, bit) \
     (((arr)[(bit) / BITS_PER_LONG] >> ((bit) % BITS_PER_LONG)) & 1UL)
+#define BIT_SET(arr, bit) \
+    ((arr)[(bit) / BITS_PER_LONG] |= 1UL << ((bit) % BITS_PER_LONG))
+#define BIT_CLEAR(arr, bit) \
+    ((arr)[(bit) / BITS_PER_LONG] &= ~(1UL << ((bit) % BITS_PER_LONG)))
 
 typedef enum
 {
@@ -117,14 +122,10 @@ typedef struct
 
     int has_last_abs;
     int last_abs_x, last_abs_y;
+    int sync_dropped;
+    int kernel_clock_monotonic;
+    unsigned long key_state[NBITS(KEY_MAX)];
 } AInputPriv;
-
-static void ainput_fd_handler(int fd, int ready, void *data)
-{
-    InputInfoPtr pInfo = data;
-    if (pInfo && pInfo->read_input)
-        pInfo->read_input(pInfo);
-}
 
 static inline void ainput_update_effective_sensitivity(AInputPriv *priv)
 {
@@ -143,14 +144,19 @@ static void ainput_apply_sensitivity(AInputPriv *priv, float new_sens)
 
 static inline void ainput_post_relative_motion(InputInfoPtr pInfo,
                                                double dx, double dy,
-                                               double raw_dx, double raw_dy)
+                                               double raw_dx, double raw_dy,
+                                               uint32_t time_ms)
 {
 #ifdef AINPUT_XSERVER_DIRECT
-    QueueAInputRelativeMotion2DRaw(pInfo->dev, dx, dy, raw_dx, raw_dy);
+    QueueAInputRelativeMotion2DRawTimed(pInfo->dev, dx, dy,
+                                       raw_dx, raw_dy, time_ms);
 #elif defined(AINPUT_XSERVER_FAST_REL2D)
+    (void)time_ms;
     QueuePointerRelativeMotion2D(pInfo->dev, dx, dy, raw_dx, raw_dy);
 #else
     ValuatorMask *mask = ((AInputPriv *)pInfo->private)->motion_mask;
+
+    (void)time_ms;
 
     valuator_mask_zero(mask);
     valuator_mask_set_unaccelerated(mask, 0, dx, raw_dx);
@@ -158,6 +164,19 @@ static inline void ainput_post_relative_motion(InputInfoPtr pInfo,
 
     QueuePointerEvents(pInfo->dev, MotionNotify, 0, POINTER_RELATIVE, mask);
 #endif
+}
+
+static inline uint32_t ainput_event_time_ms(const AInputPriv *priv,
+                                            const struct input_event *ev)
+{
+    if (priv->kernel_clock_monotonic)
+        return (uint32_t)((uint64_t)ev->time.tv_sec * 1000ULL +
+                          (uint64_t)ev->time.tv_usec / 1000ULL);
+
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    return (uint32_t)((uint64_t)now.tv_sec * 1000ULL +
+                      (uint64_t)now.tv_nsec / 1000000ULL);
 }
 
 static inline void ainput_post_button(InputInfoPtr pInfo, int button, int is_down)
@@ -179,11 +198,111 @@ static inline void ainput_post_button(InputInfoPtr pInfo, int button, int is_dow
 
 static inline void ainput_post_key(InputInfoPtr pInfo, int key_code, int is_down)
 {
-#ifdef AINPUT_XSERVER_DIRECT
-    QueueAInputKey(pInfo->dev, key_code, is_down);
-#else
     QueueKeyboardEvents(pInfo->dev, is_down ? KeyPress : KeyRelease, key_code);
-#endif
+}
+
+static inline void ainput_track_key(AInputPriv *priv, unsigned int code, int is_down)
+{
+    if (code > KEY_MAX)
+        return;
+
+    if (is_down)
+        BIT_SET(priv->key_state, code);
+    else
+        BIT_CLEAR(priv->key_state, code);
+}
+
+static int ainput_mouse_button_for_code(unsigned int code)
+{
+    switch (code)
+    {
+    case BTN_LEFT:   return 1;
+    case BTN_MIDDLE: return 2;
+    case BTN_RIGHT:  return 3;
+    case BTN_SIDE:   return 8;
+    case BTN_EXTRA:  return 9;
+    case BTN_TOUCH:  return 1;
+    default:         return 0;
+    }
+}
+
+static int ainput_mouse_button_is_down(const unsigned long state[NBITS(KEY_MAX)],
+                                       int button)
+{
+    switch (button)
+    {
+    case 1: return BIT_IS_SET(state, BTN_LEFT) || BIT_IS_SET(state, BTN_TOUCH);
+    case 2: return BIT_IS_SET(state, BTN_MIDDLE);
+    case 3: return BIT_IS_SET(state, BTN_RIGHT);
+    case 8: return BIT_IS_SET(state, BTN_SIDE);
+    case 9: return BIT_IS_SET(state, BTN_EXTRA);
+    default: return 0;
+    }
+}
+
+static void ainput_begin_resync(AInputPriv *priv)
+{
+    priv->sync_dropped = 1;
+    priv->acc_x = 0;
+    priv->acc_y = 0;
+    priv->has_abs_event = 0;
+}
+
+static void ainput_resync_state(InputInfoPtr pInfo)
+{
+    AInputPriv *priv = pInfo->private;
+    unsigned long current[NBITS(KEY_MAX)] = {0};
+
+    if (ioctl(pInfo->fd, EVIOCGKEY(sizeof(current)), current) != 0)
+    {
+        xf86Msg(X_WARNING, "%s: failed to resynchronize key/button state after SYN_DROPPED (errno: %d)\n",
+                pInfo->name, errno);
+        return;
+    }
+
+    if (priv->type == DEV_KEYBOARD)
+    {
+        for (unsigned int code = 0; code <= KEY_MAX && code + 8 <= 255; code++)
+        {
+            int was_down = BIT_IS_SET(priv->key_state, code);
+            int is_down = BIT_IS_SET(current, code);
+
+            if (was_down != is_down)
+                ainput_post_key(pInfo, (int)code + 8, is_down);
+        }
+    }
+    else
+    {
+        static const int buttons[] = {1, 2, 3, 8, 9};
+
+        for (size_t i = 0; i < sizeof(buttons) / sizeof(buttons[0]); i++)
+        {
+            int button = buttons[i];
+            int was_down = ainput_mouse_button_is_down(priv->key_state, button);
+            int is_down = ainput_mouse_button_is_down(current, button);
+
+            if (was_down != is_down)
+                ainput_post_button(pInfo, button, is_down);
+        }
+    }
+
+    memcpy(priv->key_state, current, sizeof(priv->key_state));
+
+    if (priv->is_absolute)
+    {
+        struct input_absinfo abs_x;
+        struct input_absinfo abs_y;
+
+        if (ioctl(pInfo->fd, EVIOCGABS(ABS_X), &abs_x) == 0 &&
+            ioctl(pInfo->fd, EVIOCGABS(ABS_Y), &abs_y) == 0)
+        {
+            priv->abs_x = priv->last_abs_x = abs_x.value;
+            priv->abs_y = priv->last_abs_y = abs_y.value;
+            priv->has_last_abs = 1;
+        }
+    }
+
+    priv->sync_dropped = 0;
 }
 
 static void ainput_apply_sensitivity_all(float new_sens)
@@ -265,6 +384,7 @@ static int ainput_change_property(DeviceIntPtr dev, Atom property, XIPropertyVal
 
 static void ainput_read_keyboard(InputInfoPtr pInfo)
 {
+    AInputPriv *priv = pInfo->private;
     struct input_event events[AINPUT_EVENT_BATCH];
     ssize_t len;
 
@@ -276,12 +396,28 @@ static void ainput_read_keyboard(InputInfoPtr pInfo)
         {
             const struct input_event *ev = &events[i];
 
+            if (ev->type == EV_SYN && ev->code == SYN_DROPPED)
+            {
+                ainput_begin_resync(priv);
+                continue;
+            }
+
+            if (priv->sync_dropped)
+            {
+                if (ev->type == EV_SYN && ev->code == SYN_REPORT)
+                    ainput_resync_state(pInfo);
+                continue;
+            }
+
             if (ev->type != EV_KEY || ev->value == 2)
                 continue;
 
             int x11_keycode = ev->code + 8;
             if (x11_keycode >= 8 && x11_keycode <= 255)
+            {
                 ainput_post_key(pInfo, x11_keycode, ev->value != 0);
+                ainput_track_key(priv, ev->code, ev->value != 0);
+            }
         }
     }
 }
@@ -299,6 +435,19 @@ static void ainput_read_mouse(InputInfoPtr pInfo)
         for (size_t i = 0; i < count; i++)
         {
             const struct input_event *ev = &events[i];
+
+            if (ev->type == EV_SYN && ev->code == SYN_DROPPED)
+            {
+                ainput_begin_resync(priv);
+                continue;
+            }
+
+            if (priv->sync_dropped)
+            {
+                if (ev->type == EV_SYN && ev->code == SYN_REPORT)
+                    ainput_resync_state(pInfo);
+                continue;
+            }
 
             switch (ev->type)
             {
@@ -337,19 +486,13 @@ static void ainput_read_mouse(InputInfoPtr pInfo)
 
             case EV_KEY:
             {
-                int button = 0;
-                switch (ev->code)
-                {
-                case BTN_LEFT:   button = 1; break;
-                case BTN_MIDDLE: button = 2; break;
-                case BTN_RIGHT:  button = 3; break;
-                case BTN_SIDE:   button = 8; break;
-                case BTN_EXTRA:  button = 9; break;
-                case BTN_TOUCH:  button = 1; break;
-                }
+                int button = ainput_mouse_button_for_code(ev->code);
 
                 if (button > 0)
+                {
                     ainput_post_button(pInfo, button, ev->value != 0);
+                    ainput_track_key(priv, ev->code, ev->value != 0);
+                }
                 break;
             }
 
@@ -366,7 +509,8 @@ static void ainput_read_mouse(InputInfoPtr pInfo)
 
                     ainput_post_relative_motion(pInfo, dx, dy,
                                                 (double)priv->acc_x,
-                                                (double)priv->acc_y);
+                                                (double)priv->acc_y,
+                                                ainput_event_time_ms(priv, ev));
 
                     priv->acc_x = 0;
                     priv->acc_y = 0;
@@ -400,7 +544,8 @@ static void ainput_read_mouse(InputInfoPtr pInfo)
 
                     ainput_post_relative_motion(pInfo, step_x, step_y,
                                                 (double)delta_x,
-                                                (double)delta_y);
+                                                (double)delta_y,
+                                                ainput_event_time_ms(priv, ev));
 
                     priv->has_abs_event = 0;
                 }
@@ -508,15 +653,13 @@ static int ainput_control(DeviceIntPtr dev, int what)
 
     case DEVICE_ON:
         if (pInfo->fd != -1)
-        {
-            SetNotifyFd(pInfo->fd, ainput_fd_handler, X_NOTIFY_READ, pInfo);
-        }
+            xf86AddEnabledDevice(pInfo);
         dev->public.on = TRUE;
         return Success;
 
     case DEVICE_OFF:
         if (pInfo->fd != -1)
-            RemoveNotifyFd(pInfo->fd);
+            xf86RemoveEnabledDevice(pInfo);
         dev->public.on = FALSE;
         return Success;
 
@@ -627,7 +770,7 @@ static void ainput_setup_info(InputInfoPtr pInfo, AInputPriv *priv)
     pInfo->private = priv;
     pInfo->read_input = (priv->type == DEV_MOUSE) ? ainput_read_mouse : ainput_read_keyboard;
     pInfo->device_control = ainput_control;
-    pInfo->flags = XI86_ALWAYS_CORE;
+    pInfo->flags |= XI86_ALWAYS_CORE;
     pInfo->type_name = (priv->type == DEV_MOUSE) ? XI_MOUSE : XI_KEYBOARD;
 }
 
@@ -681,7 +824,8 @@ static int ainput_pre_init(InputDriverPtr drv, InputInfoPtr pInfo, int flags)
     ainput_update_effective_sensitivity(priv);
 
     unsigned int clk = CLOCK_MONOTONIC;
-    ioctl(priv->fd, EVIOCSCLOCKID, &clk);
+    priv->kernel_clock_monotonic =
+        (ioctl(priv->fd, EVIOCSCLOCKID, &clk) == 0);
 
     ainput_setup_info(pInfo, priv);
     xf86ProcessCommonOptions(pInfo, pInfo->options);
