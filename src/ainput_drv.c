@@ -124,8 +124,14 @@ typedef struct
     int last_abs_x, last_abs_y;
     int sync_dropped;
     int kernel_clock_monotonic;
+    int last_read_error;
     unsigned long key_state[NBITS(KEY_MAX)];
 } AInputPriv;
+
+static inline int ainput_fd_is_server_managed(const InputInfoPtr pInfo)
+{
+    return pInfo && (pInfo->flags & XI86_SERVER_FD);
+}
 
 static inline void ainput_update_effective_sensitivity(AInputPriv *priv)
 {
@@ -382,6 +388,24 @@ static int ainput_change_property(DeviceIntPtr dev, Atom property, XIPropertyVal
     return Success;
 }
 
+static void ainput_report_read_end(InputInfoPtr pInfo, ssize_t len)
+{
+    AInputPriv *priv = pInfo->private;
+    int error;
+
+    if (len < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR))
+        return;
+
+    error = (len == 0) ? ENODEV : errno;
+    if (error == priv->last_read_error)
+        return;
+
+    priv->last_read_error = error;
+    xf86Msg(X_WARNING,
+            "%s: input device stopped producing events (fd=%d, errno=%d: %s)\n",
+            pInfo->name, pInfo->fd, error, strerror(error));
+}
+
 static void ainput_read_keyboard(InputInfoPtr pInfo)
 {
     AInputPriv *priv = pInfo->private;
@@ -390,6 +414,7 @@ static void ainput_read_keyboard(InputInfoPtr pInfo)
 
     while ((len = read(pInfo->fd, events, sizeof(events))) > 0)
     {
+        priv->last_read_error = 0;
         size_t count = (size_t)len / sizeof(events[0]);
 
         for (size_t i = 0; i < count; i++)
@@ -420,6 +445,8 @@ static void ainput_read_keyboard(InputInfoPtr pInfo)
             }
         }
     }
+
+    ainput_report_read_end(pInfo, len);
 }
 
 static void ainput_read_mouse(InputInfoPtr pInfo)
@@ -430,6 +457,7 @@ static void ainput_read_mouse(InputInfoPtr pInfo)
 
     while ((len = read(pInfo->fd, events, sizeof(events))) > 0)
     {
+        priv->last_read_error = 0;
         size_t count = (size_t)len / sizeof(events[0]);
 
         for (size_t i = 0; i < count; i++)
@@ -553,6 +581,8 @@ static void ainput_read_mouse(InputInfoPtr pInfo)
             }
         }
     }
+
+    ainput_report_read_end(pInfo, len);
 }
 
 static int ainput_device_init(DeviceIntPtr dev)
@@ -628,23 +658,27 @@ static int ainput_device_close(DeviceIntPtr dev)
 {
     InputInfoPtr pInfo = dev->public.devicePrivate;
     AInputPriv *priv = pInfo ? pInfo->private : NULL;
+    int server_managed = ainput_fd_is_server_managed(pInfo);
 
     if (priv && priv->motion_mask)
         valuator_mask_free(&priv->motion_mask);
 
-    if (pInfo && pInfo->fd != -1)
+    if (pInfo && pInfo->fd != -1 && !server_managed)
     {
         xf86CloseSerial(pInfo->fd);
-        if (priv)
-            priv->fd = -1;
         pInfo->fd = -1;
     }
+
+    if (priv)
+        priv->fd = -1;
+
     return Success;
 }
 
 static int ainput_control(DeviceIntPtr dev, int what)
 {
     InputInfoPtr pInfo = dev->public.devicePrivate;
+    AInputPriv *priv = pInfo->private;
 
     switch (what)
     {
@@ -653,13 +687,19 @@ static int ainput_control(DeviceIntPtr dev, int what)
 
     case DEVICE_ON:
         if (pInfo->fd != -1)
+        {
+            priv->fd = pInfo->fd;
+            priv->last_read_error = 0;
             xf86AddEnabledDevice(pInfo);
+        }
         dev->public.on = TRUE;
         return Success;
 
     case DEVICE_OFF:
         if (pInfo->fd != -1)
             xf86RemoveEnabledDevice(pInfo);
+        if (ainput_fd_is_server_managed(pInfo))
+            priv->fd = -1;
         dev->public.on = FALSE;
         return Success;
 
@@ -841,7 +881,7 @@ static void ainput_uninit(InputDriverPtr drv, InputInfoPtr pInfo, int flags)
     {
         if (priv->motion_mask)
             valuator_mask_free(&priv->motion_mask);
-        if (priv->fd >= 0)
+        if (priv->fd >= 0 && !ainput_fd_is_server_managed(pInfo))
             close(priv->fd);
         free(priv);
         pInfo->private = NULL;
