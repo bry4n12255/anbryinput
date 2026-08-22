@@ -1,543 +1,308 @@
-diff --git a/dix/eventconvert.c b/dix/eventconvert.c
-index 1b6bf55..e7946e8 100644
---- a/dix/eventconvert.c
-+++ b/dix/eventconvert.c
-@@ -31,6 +31,7 @@
- #include <dix-config.h>
-
- #include <stdint.h>
-+#include <math.h>
- #include <X11/X.h>
- #include <X11/extensions/XIproto.h>
- #include <X11/extensions/XI2proto.h>
-@@ -58,6 +59,8 @@ static int eventToKeyButtonPointer(DeviceEvent *ev, xEvent **xi, int *count);
- static int eventToDeviceChanged(DeviceChangedEvent *ev, xEvent **dcce);
- static int eventToDeviceEvent(DeviceEvent *ev, xEvent **xi);
- static int eventToRawEvent(RawDeviceEvent *ev, xEvent **xi);
-+static int eventToAInputDeviceEvent(DeviceEvent *ev, xEvent **xi);
-+static int eventToAInputRawEvent(RawDeviceEvent *ev, xEvent **xi);
- static int eventToBarrierEvent(BarrierEvent *ev, xEvent **xi);
- static int eventToTouchOwnershipEvent(TouchOwnershipEvent *ev, xEvent **xi);
- static int eventToGestureSwipeEvent(GestureEvent *ev, xEvent **xi);
-@@ -279,6 +282,8 @@ EventToXI2(InternalEvent *ev, xEvent **xi)
-     case ET_TouchBegin:
-     case ET_TouchUpdate:
-     case ET_TouchEnd:
-+        if (ev->device_event.flags & AINPUT_FAST_EVENT)
-+            return eventToAInputDeviceEvent(&ev->device_event, xi);
-         return eventToDeviceEvent(&ev->device_event, xi);
-     case ET_TouchOwnership:
-         return eventToTouchOwnershipEvent(&ev->touch_ownership_event, xi);
-@@ -296,6 +301,8 @@ EventToXI2(InternalEvent *ev, xEvent **xi)
-     case ET_RawTouchBegin:
-     case ET_RawTouchUpdate:
-     case ET_RawTouchEnd:
-+        if (ev->raw_event.flags & AINPUT_FAST_EVENT)
-+            return eventToAInputRawEvent(&ev->raw_event, xi);
-         return eventToRawEvent(&ev->raw_event, xi);
-     case ET_BarrierHit:
-     case ET_BarrierLeave:
-@@ -747,6 +754,170 @@ eventToDeviceEvent(DeviceEvent *ev, xEvent **xi)
-     return Success;
- }
-
-+static int
-+AInputDeviceEventValuatorCount(DeviceEvent *ev)
-+{
-+    if (ev->type != ET_Motion)
-+        return 0;
-+
-+    if (!BitIsOn(ev->valuators.mask, 0) ||
-+        !BitIsOn(ev->valuators.mask, 1))
-+        return -1;
-+
-+    return 2;
-+}
-+
-+static int
-+AInputButtonMaskLen(DeviceEvent *ev)
-+{
-+    int i;
-+
-+    for (i = sizeof(ev->buttons) - 1; i >= 0; i--)
-+        if (ev->buttons[i])
-+            return bytes_to_int32(i + 1);
-+
-+    return 0;
-+}
-+
-+static inline FP1616
-+AInputDoubleToFP1616(double in)
-+{
-+    return (FP1616) (in * 65536.0);
-+}
-+
-+static inline FP3232
-+AInputDoubleToFP3232(double in)
-+{
-+    FP3232 ret;
-+    int32_t integral;
-+    double tmp = floor(in);
-+
-+    integral = (int32_t) tmp;
-+    ret.integral = integral;
-+    ret.frac = (uint32_t) ((in - integral) * (1ULL << 32));
-+
-+    return ret;
-+}
-+
-+static int
-+eventToAInputDeviceEvent(DeviceEvent *ev, xEvent **xi)
-+{
-+    int nvals = AInputDeviceEventValuatorCount(ev);
-+    int btlen = AInputButtonMaskLen(ev);
-+    int vallen = (nvals == 2) ? 1 : 0; /* Axes 0 and 1 fit in one word. */
-+    int len;
-+    xXIDeviceEvent *xde;
-+    char *ptr;
-+    FP3232 *axisval;
-+
-+    if (nvals < 0)
-+        return eventToDeviceEvent(ev, xi);
-+
-+    len = sizeof(xXIDeviceEvent) + btlen * 4 + vallen * 4;
-+    len += nvals * sizeof(FP3232);
-+
-+    *xi = malloc(len);
-+    if (*xi == NULL)
-+        return BadAlloc;
-+
-+    xde = (xXIDeviceEvent *) *xi;
-+    memset(xde, 0, sizeof(*xde));
-+    xde->type = GenericEvent;
-+    xde->extension = EXTENSION_MAJOR_XINPUT;
-+    xde->evtype = GetXI2Type(ev->type);
-+    xde->time = ev->time;
-+    xde->length = bytes_to_int32(len - sizeof(xEvent));
-+    xde->detail = ev->detail.button;
-+    xde->root = ev->root;
-+    xde->buttons_len = btlen;
-+    xde->valuators_len = vallen;
-+    xde->deviceid = ev->deviceid;
-+    xde->sourceid = ev->sourceid;
-+    xde->root_x = AInputDoubleToFP1616(ev->root_x + ev->root_x_frac);
-+    xde->root_y = AInputDoubleToFP1616(ev->root_y + ev->root_y_frac);
-+    xde->flags = ev->flags & ~AINPUT_FAST_EVENT;
-+
-+    if (ev->key_repeat)
-+        xde->flags |= XIKeyRepeat;
-+
-+    xde->mods.base_mods = ev->mods.base;
-+    xde->mods.latched_mods = ev->mods.latched;
-+    xde->mods.locked_mods = ev->mods.locked;
-+    xde->mods.effective_mods = ev->mods.effective;
-+
-+    xde->group.base_group = ev->group.base;
-+    xde->group.latched_group = ev->group.latched;
-+    xde->group.locked_group = ev->group.locked;
-+    xde->group.effective_group = ev->group.effective;
-+
-+    ptr = (char *) &xde[1];
-+    memset(ptr, 0, xde->buttons_len * 4 + xde->valuators_len * 4);
-+    memcpy(ptr, ev->buttons, xde->buttons_len * 4);
-+
-+    if (nvals == 2) {
-+        ptr += xde->buttons_len * 4;
-+        axisval = (FP3232 *) (ptr + xde->valuators_len * 4);
-+        SetBit(ptr, 0);
-+        SetBit(ptr, 1);
-+        axisval[0] = AInputDoubleToFP3232(ev->valuators.data[0]);
-+        axisval[1] = AInputDoubleToFP3232(ev->valuators.data[1]);
-+    }
-+
-+    return Success;
-+}
-+
-+static int
-+eventToAInputRawEvent(RawDeviceEvent *ev, xEvent **xi)
-+{
-+    int nvals = (ev->type == ET_RawMotion) ? 2 : 0;
-+    int vallen = nvals ? 1 : 0;
-+    int len;
-+    xXIRawEvent *raw;
-+    char *ptr;
-+    FP3232 *axisval, *axisval_raw;
-+
-+    if (ev->type == ET_RawMotion &&
-+        (!BitIsOn(ev->valuators.mask, 0) ||
-+         !BitIsOn(ev->valuators.mask, 1)))
-+        return eventToRawEvent(ev, xi);
-+
-+    len = sizeof(xXIRawEvent) + vallen * 4;
-+    len += nvals * sizeof(FP3232) * 2;
-+
-+    *xi = malloc(len);
-+    if (*xi == NULL)
-+        return BadAlloc;
-+
-+    raw = (xXIRawEvent *) *xi;
-+    memset(raw, 0, sizeof(*raw));
-+    raw->type = GenericEvent;
-+    raw->extension = EXTENSION_MAJOR_XINPUT;
-+    raw->evtype = GetXI2Type(ev->type);
-+    raw->time = ev->time;
-+    raw->length = bytes_to_int32(len - sizeof(xEvent));
-+    raw->detail = ev->detail.button;
-+    raw->deviceid = ev->deviceid;
-+    raw->sourceid = ev->sourceid;
-+    raw->valuators_len = vallen;
-+    raw->flags = ev->flags & ~AINPUT_FAST_EVENT;
-+
-+    ptr = (char *) &raw[1];
-+    memset(ptr, 0, raw->valuators_len * 4);
-+
-+    if (nvals == 2) {
-+        axisval = (FP3232 *) (ptr + raw->valuators_len * 4);
-+        axisval_raw = axisval + 2;
-+        SetBit(ptr, 0);
-+        SetBit(ptr, 1);
-+        axisval[0] = AInputDoubleToFP3232(ev->valuators.data[0]);
-+        axisval[1] = AInputDoubleToFP3232(ev->valuators.data[1]);
-+        axisval_raw[0] = AInputDoubleToFP3232(ev->valuators.data_raw[0]);
-+        axisval_raw[1] = AInputDoubleToFP3232(ev->valuators.data_raw[1]);
-+    }
-+
-+    return Success;
-+}
-+
- static int
- eventToTouchOwnershipEvent(TouchOwnershipEvent *ev, xEvent **xi)
- {
 diff --git a/dix/getevents.c b/dix/getevents.c
-index b0cb3bc..3d91747 100644
+index 56dc269..1bdcf49 100644
 --- a/dix/getevents.c
 +++ b/dix/getevents.c
-@@ -1288,6 +1288,177 @@ QueuePointerEvents(DeviceIntPtr device, int type,
+@@ -1271,6 +1271,54 @@ QueuePointerEvents(DeviceIntPtr device, int type,
      queueEventList(device, InputEventList, nevents);
  }
 
++/* Experimental AnbryInput-only keyboard construction path. */
++void
++QueueAInputKeyTimed(DeviceIntPtr device, int keycode, int is_down, CARD32 ms)
++{
++    InternalEvent *raw_slot;
++    InternalEvent *event_slot;
++    RawDeviceEvent *raw;
++    DeviceEvent *event;
++    DeviceIntPtr master;
++    int type = is_down ? KeyPress : KeyRelease;
++
++    if (!device || !device->enabled || !device->key || !device->focus ||
++        !device->kbdfeed || keycode < 8 || keycode > 255)
++        return;
++
++    /* Let the regular path validate the uncommon repeat case. */
++    if (is_down && key_is_down(device, keycode, KEY_POSTED)) {
++        QueueKeyboardEvents(device, type, keycode);
++        return;
++    }
++
++    /* A slave switch requires the regular DeviceChanged prefix event. */
++    master = GetMaster(device, MASTER_KEYBOARD);
++    if (master && master->last.slave != device) {
++        QueueKeyboardEvents(device, type, keycode);
++        return;
++    }
++
++    if (!mieqReserveAInputPair(&raw_slot, &event_slot)) {
++        QueueKeyboardEvents(device, type, keycode);
++        return;
++    }
++
++    raw = &raw_slot->raw_event;
++    event = &event_slot->device_event;
++    init_raw(device, raw, ms, type, keycode);
++    init_device_event(event, device, ms, EVENT_SOURCE_NORMAL);
++    event->type = is_down ? ET_KeyPress : ET_KeyRelease;
++    event->detail.key = keycode;
++
++    if (is_down)
++        set_key_down(device, keycode, KEY_POSTED);
++    else
++        set_key_up(device, keycode, KEY_POSTED);
++
++    mieqCommitAInputPair(device, 0);
++}
++
+ /**
+  * Helper function for GetPointerEvents, which only generates motion and
+  * raw motion events for the slave device: does not update the master device.
+@@ -1759,6 +1807,146 @@ GetPointerEvents(InternalEvent *events, DeviceIntPtr pDev, int type,
+     return num_events;
+ }
+
++static Bool
++ainput_relative_transform_is_identity(const DeviceIntPtr device)
++{
++    const struct pixman_f_transform *m = &device->relative_transform;
++
++    return m->m[0][0] == 1.0 && m->m[0][1] == 0.0 && m->m[0][2] == 0.0 &&
++           m->m[1][0] == 0.0 && m->m[1][1] == 1.0 && m->m[1][2] == 0.0 &&
++           m->m[2][0] == 0.0 && m->m[2][1] == 0.0 && m->m[2][2] == 1.0;
++}
++
++static Bool
++ainput_can_specialize_relative_2d(const DeviceIntPtr device)
++{
++    const ValuatorClassPtr v = device->valuator;
++
++    return v->numAxes == 2 &&
++           (v->axes[0].mode & DeviceMode) == Relative &&
++           (v->axes[1].mode & DeviceMode) == Relative &&
++           v->axes[0].max_value <= v->axes[0].min_value &&
++           v->axes[1].max_value <= v->axes[1].min_value;
++}
++
 +/*
-+ * Experimental AnbryInput-only relative 2D fast path.
-+ *
-+ * This intentionally supports only the narrow contract AnbryInput needs:
-+ * relative mouse motion on axes 0/1, no acceleration, no scroll emulation,
-+ * no absolute/tablet/touchpad handling, and no generic valuator traversal.
-+ *
-+ * It still preserves the externally important pieces:
-+ * - XI_RawMotion
-+ * - XI_Motion/core pointer motion
-+ * - sprite movement, clipping, barriers, and screen crossing through
-+ *   miPointerSetPosition()
-+ * - master pointer last coordinates
-+ *
-+ * Drivers must only call this for simple relative pointer motion.
++ * Narrow version of fill_pointer_events() for AnbryInput's unbounded,
++ * relative, two-axis mouse.  Keep the shared positioning/history helpers so
++ * barriers, confinement, screen crossing and master/slave state retain the
++ * normal server semantics.  The caller falls back to fill_pointer_events()
++ * whenever these invariants are not true.
 + */
++static int
++fill_ainput_relative_motion_2d(InternalEvent *events, DeviceIntPtr device,
++                               CARD32 ms, double dx, double dy,
++                               double raw_dx, double raw_dy)
++{
++    RawDeviceEvent *raw = &events->raw_event;
++    DeviceEvent *event;
++    ValuatorMask mask;
++    ScreenPtr scr;
++    double devx, devy, screenx, screeny;
++    int num_barrier_events = 0;
++    int num_events = 1;
++
++    init_raw(device, raw, ms, MotionNotify, 0);
++    SetBit(raw->valuators.mask, 0);
++    SetBit(raw->valuators.mask, 1);
++    raw->valuators.data_raw[0] = raw_dx;
++    raw->valuators.data_raw[1] = raw_dy;
++    events++;
++
++    /* Only fields reachable through last_bit are initialized.  This avoids
++     * zeroing and copying the full MAX_VALUATORS-sized mask on every report. */
++    mask.last_bit = 1;
++    mask.has_unaccelerated = FALSE;
++    mask.mask[0] = 0x3;
++    mask.valuators[0] = dx;
++    mask.valuators[1] = dy;
++
++    if (!ainput_relative_transform_is_identity(device))
++        transformRelative(device, &mask);
++
++    set_raw_valuators(raw, &mask, FALSE, raw->valuators.data);
++    moveRelative(device, POINTER_RELATIVE, &mask);
++
++    devx = screenx = valuator_mask_isset(&mask, 0) ?
++        valuator_mask_get_double(&mask, 0) : device->last.valuators[0];
++    devy = screeny = valuator_mask_isset(&mask, 1) ?
++        valuator_mask_get_double(&mask, 1) : device->last.valuators[1];
++
++    scr = positionSprite(device, Relative, &mask, &devx, &devy,
++                         &screenx, &screeny, &num_barrier_events, events);
++    num_events += num_barrier_events;
++    events += num_barrier_events;
++
++    updateHistory(device, &mask, ms);
++    storeLastValuators(device, &mask, devx, devy);
++
++    if (!InputDevIsMaster(device) && !InputDevIsFloating(device)) {
++        DeviceIntPtr master = GetMaster(device, MASTER_POINTER);
++
++        master->last.valuators[0] = screenx;
++        master->last.valuators[1] = screeny;
++    }
++
++    event = &events->device_event;
++    init_device_event(event, device, ms, EVENT_SOURCE_NORMAL);
++    event->type = ET_Motion;
++    event->detail.button = 0;
++    event_set_root_coordinates(event, screenx - scr->x, screeny - scr->y);
++    set_valuators(device, event, &mask);
++
++    return num_events + 1;
++}
++
++/* AnbryInput relative-motion path with normal pointer semantics. */
 +void
 +QueueAInputRelativeMotion2DRawTimed(DeviceIntPtr device, double dx, double dy,
 +                                    double raw_dx, double raw_dy, CARD32 ms)
 +{
 +    InternalEvent *events = InputEventList;
 +    InternalEvent *out;
-+    RawDeviceEvent *raw;
-+    DeviceEvent *event;
-+    DeviceIntPtr master;
-+    ScreenPtr scr;
-+    ValuatorMask history_mask = {0};
-+    int prefix_events;
++    InternalEvent *first;
++    InternalEvent *second;
++    ValuatorMask mask;
 +    int num_events = 0;
-+    int barrier_events = 0;
-+    double old_x, old_y;
-+    double screenx, screeny;
++    int generated;
 +
 +    if (!device || !device->enabled || !device->valuator ||
-+        device->valuator->numAxes < 2)
++        device->valuator->numAxes < 2 || !miPointerGetScreen(device))
 +        return;
 +
-+    scr = miPointerGetScreen(device);
-+    if (!scr)
-+        return;
-+
-+    master = (!InputDevIsMaster(device) && !InputDevIsFloating(device)) ?
-+             GetMaster(device, MASTER_POINTER) : NULL;
-+    if (master && master->last.slave != device)
-+        out = UpdateFromMaster(events, device, DEVCHANGE_POINTER_EVENT, &num_events);
-+    else
-+        out = events;
-+    prefix_events = num_events;
-+
-+    raw = &out->raw_event;
-+    init_raw(device, raw, ms, MotionNotify, 0);
-+    SetBit(raw->valuators.mask, 0);
-+    SetBit(raw->valuators.mask, 1);
-+    raw->valuators.data_raw[0] = raw_dx;
-+    raw->valuators.data_raw[1] = raw_dy;
-+    raw->valuators.data[0] = raw_dx;
-+    raw->valuators.data[1] = raw_dy;
-+    /* Use the server's standard XI2 wire conversion for client compatibility. */
-+    raw->flags = 0;
-+    out++;
-+    num_events++;
-+
-+    old_x = device->last.valuators[0];
-+    old_y = device->last.valuators[1];
-+    screenx = old_x + dx;
-+    screeny = old_y + dy;
-+
-+    scr = miPointerSetPosition(device, Relative, &screenx, &screeny,
-+                               &barrier_events, out);
-+    out += barrier_events;
-+    num_events += barrier_events;
-+
-+    history_mask.last_bit = 1;
-+    history_mask.mask[0] = 0x3;
-+    history_mask.valuators[0] = screenx - scr->x;
-+    history_mask.valuators[1] = screeny - scr->y;
-+    updateHistory(device, &history_mask, ms);
-+
-+    device->last.valuators[0] = screenx;
-+    device->last.valuators[1] = screeny;
-+
-+    if (master) {
-+        master->last.valuators[0] = screenx;
-+        master->last.valuators[1] = screeny;
++    out = UpdateFromMaster(events, device, DEVCHANGE_POINTER_EVENT,
++                           &num_events);
++    if (ainput_can_specialize_relative_2d(device)) {
++        generated = fill_ainput_relative_motion_2d(out, device, ms, dx, dy,
++                                                   raw_dx, raw_dy);
 +    }
++    else {
++        valuator_mask_zero(&mask);
++        valuator_mask_set_unaccelerated(&mask, 0, dx, raw_dx);
++        valuator_mask_set_unaccelerated(&mask, 1, dy, raw_dy);
++        generated = fill_pointer_events(out, device, MotionNotify, 0, ms,
++                                        POINTER_RELATIVE, &mask);
++    }
++    num_events += generated;
 +
-+    event = &out->device_event;
-+    init_device_event(event, device, ms, EVENT_SOURCE_NORMAL);
-+    event->type = ET_Motion;
-+    event->detail.button = 0;
-+    event_set_root_coordinates(event, screenx - scr->x, screeny - scr->y);
-+    SetBit(event->valuators.mask, 0);
-+    SetBit(event->valuators.mask, 1);
-+    event->valuators.data[0] = screenx - scr->x;
-+    event->valuators.data[1] = screeny - scr->y;
-+    event->flags = 0;
-+    out++;
-+    num_events++;
-+
-+    if (prefix_events == 0 && barrier_events == 0)
-+        mieqEnqueueAInputMotionPair(device, &InputEventList[0],
-+                                    &InputEventList[1]);
-+    else
-+        queueEventList(device, InputEventList, num_events);
-+}
-+
-+/*
-+ * Experimental AnbryInput-only mouse button fast path.
-+ *
-+ * This path is meant for ordinary pointer buttons. Scroll buttons should stay
-+ * on the normal Xorg/XLibre path so smooth scrolling and legacy emulation keep
-+ * their usual behavior.
-+ */
-+void
-+QueueAInputButton(DeviceIntPtr device, int button, int is_down)
-+{
-+    CARD32 ms = GetTimeInMillis();
-+    InternalEvent *events = InputEventList;
-+    InternalEvent *out;
-+    RawDeviceEvent *raw;
-+    DeviceEvent *event;
-+    ScreenPtr scr;
-+    int prefix_events;
-+    int num_events = 0;
-+    int type;
-+
-+    if (!device || !device->enabled || !device->button || !button ||
-+        button >= MAX_BUTTONS)
-+        return;
-+
-+    scr = miPointerGetScreen(device);
-+    if (!scr)
-+        return;
-+
-+    type = is_down ? ButtonPress : ButtonRelease;
-+    if (!!is_down == !!button_is_down(device, button, BUTTON_POSTED))
-+        return;
-+
-+    out = UpdateFromMaster(events, device, DEVCHANGE_POINTER_EVENT, &num_events);
-+    prefix_events = num_events;
-+
-+    raw = &out->raw_event;
-+    init_raw(device, raw, ms, type, button);
-+    raw->flags = 0;
-+    out++;
-+    num_events++;
-+
-+    event = &out->device_event;
-+    init_device_event(event, device, ms, EVENT_SOURCE_NORMAL);
-+    event->type = is_down ? ET_ButtonPress : ET_ButtonRelease;
-+    event->detail.button = button;
-+    event->flags = 0;
-+    event_set_root_coordinates(event,
-+                               device->last.valuators[0] - scr->x,
-+                               device->last.valuators[1] - scr->y);
-+
-+    if (is_down)
-+        set_button_down(device, button, BUTTON_POSTED);
-+    else
-+        set_button_up(device, button, BUTTON_POSTED);
-+
-+    out++;
-+    num_events++;
-+
-+    if (prefix_events == 0)
-+        mieqEnqueueAInputButtonPair(device, &InputEventList[0],
-+                                    &InputEventList[1]);
-+    else
-+        queueEventList(device, InputEventList, num_events);
++    if (num_events == 2) {
++        if (mieqReserveAInputPair(&first, &second)) {
++            memcpy(first, &events[0], events[0].any.length);
++            memcpy(second, &events[1], events[1].any.length);
++            mieqCommitAInputPair(device, device->id);
++        }
++        else {
++            queueEventList(device, events, num_events);
++        }
++    }
++    else {
++        queueEventList(device, events, num_events);
++    }
 +}
 +
  /**
-  * Helper function for GetPointerEvents, which only generates motion and
-  * raw motion events for the slave device: does not update the master device.
-diff --git a/include/eventstr.h b/include/eventstr.h
-index a9926ea..a23285f 100644
---- a/include/eventstr.h
-+++ b/include/eventstr.h
-@@ -92,6 +92,9 @@ enum DeviceEventSource {
-   EVENT_SOURCE_FOCUS, /**< Keys or buttons previously down on focus-in */
- };
-
-+/* Internal-only marker for AnbryInput experimental fast-path events. */
-+#define AINPUT_FAST_EVENT (1u << 31)
-+
- /**
-  * Used for ALL input device events internal in the server until
-  * copied into the matching protocol event.
+  * Generate internal events representing this proximity event and enqueue
+  * them on the event queue.
 diff --git a/include/input.h b/include/input.h
-index de89ee3..2710476 100644
+index de89ee3..cda5817 100644
 --- a/include/input.h
 +++ b/include/input.h
-@@ -437,6 +437,14 @@ extern _X_EXPORT void QueuePointerEvents(DeviceIntPtr pDev,
+@@ -437,6 +437,15 @@ extern _X_EXPORT void QueuePointerEvents(DeviceIntPtr pDev,
                                           int buttons,
                                           int flags, const ValuatorMask *mask);
 
++extern _X_EXPORT void QueueAInputKeyTimed(DeviceIntPtr pDev,
++                                          int keycode, int is_down,
++                                          CARD32 time_ms);
 +extern _X_EXPORT void QueueAInputRelativeMotion2DRawTimed(DeviceIntPtr pDev,
 +                                                          double dx, double dy,
-+                                                          double raw_dx, double raw_dy,
++                                                          double raw_dx,
++                                                          double raw_dy,
 +                                                          CARD32 time_ms);
-+
-+extern _X_EXPORT void QueueAInputButton(DeviceIntPtr pDev,
-+                                        int button, int is_down);
 +
  extern _X_EXPORT int GetKeyboardEvents(InternalEvent *events,
                                         DeviceIntPtr pDev,
                                         int type,
 diff --git a/mi/mi_priv.h b/mi/mi_priv.h
-index ba52f03..aba0c34 100644
+index ba52f03..2223a7c 100644
 --- a/mi/mi_priv.h
 +++ b/mi/mi_priv.h
-@@ -39,6 +39,12 @@ void miStepDash(int dist, int * pDashIndex, unsigned char * pDash,
+@@ -39,6 +39,8 @@ void miStepDash(int dist, int * pDashIndex, unsigned char * pDash,
  Bool mieqInit(void);
  void mieqFini(void);
  void mieqEnqueue(DeviceIntPtr pDev, InternalEvent *e);
-+void mieqEnqueueAInputMotionPair(DeviceIntPtr pDev,
-+                                 InternalEvent *raw,
-+                                 InternalEvent *motion);
-+void mieqEnqueueAInputButtonPair(DeviceIntPtr pDev,
-+                                 InternalEvent *raw,
-+                                 InternalEvent *button);
++Bool mieqReserveAInputPair(InternalEvent **first, InternalEvent **second);
++void mieqCommitAInputPair(DeviceIntPtr pDev, int last_motion);
  void mieqSwitchScreen(DeviceIntPtr pDev, ScreenPtr pScreen, Bool set_dequeue_screen);
  void mieqProcessDeviceEvent(DeviceIntPtr dev, InternalEvent *event, ScreenPtr screen);
  void mieqProcessInputEvents(void);
 diff --git a/mi/mieq.c b/mi/mieq.c
-index 96e3183..0d71fb5 100644
+index 269156f..4fe4b8e 100644
 --- a/mi/mieq.c
 +++ b/mi/mieq.c
-@@ -272,6 +272,96 @@ mieqEnqueue(DeviceIntPtr pDev, InternalEvent *e)
+@@ -272,6 +272,64 @@ mieqEnqueue(DeviceIntPtr pDev, InternalEvent *e)
      miEventQueue.tail = (oldtail + 1) % miEventQueue.nevents;
  }
 
-+static inline void
-+mieqEnqueueAInputPair(DeviceIntPtr pDev, InternalEvent *first,
-+                      InternalEvent *second, int second_is_motion)
++Bool
++mieqReserveAInputPair(InternalEvent **first, InternalEvent **second)
 +{
-+    InternalEvent *first_out;
-+    InternalEvent *second_out;
-+    ScreenPtr screen;
-+    unsigned int first_tail;
-+    unsigned int second_tail;
-+    size_t n_enqueued;
-+    Time time;
++    unsigned int first_tail = miEventQueue.tail;
++    unsigned int second_tail = first_tail + 1;
++    unsigned int new_tail;
 +
-+    if (!first || !second ||
-+        first->any.length == 0 || first->any.length > sizeof(InternalEvent) ||
-+        second->any.length == 0 || second->any.length > sizeof(InternalEvent) ||
-+        !((first->any.type == ET_RawMotion &&
-+           second->any.type == ET_Motion) ||
-+          (first->any.type == ET_RawButtonPress &&
-+           second->any.type == ET_ButtonPress) ||
-+          (first->any.type == ET_RawButtonRelease &&
-+           second->any.type == ET_ButtonRelease))) {
-+        miEventQueue.dropped++;
-+        return;
-+    }
++    if (second_tail == miEventQueue.nevents)
++        second_tail = 0;
++    new_tail = second_tail + 1;
++    if (new_tail == miEventQueue.nevents)
++        new_tail = 0;
 +
-+    n_enqueued = mieqNumEnqueued(&miEventQueue);
-+    if (n_enqueued + 2 >= miEventQueue.nevents) {
++    if (second_tail == miEventQueue.head || new_tail == miEventQueue.head) {
 +        if (!mieqGrowQueue(&miEventQueue, miEventQueue.nevents << 1)) {
 +            miEventQueue.dropped++;
-+            return;
++            return FALSE;
 +        }
++        first_tail = miEventQueue.tail;
++        second_tail = first_tail + 1;
 +    }
 +
++    *first = miEventQueue.events[first_tail].events;
++    *second = miEventQueue.events[second_tail].events;
++    return TRUE;
++}
++
++void
++mieqCommitAInputPair(DeviceIntPtr pDev, int last_motion)
++{
++    ScreenPtr screen = EnqueueScreen(pDev);
++    unsigned int first_tail = miEventQueue.tail;
++    unsigned int second_tail = first_tail + 1;
++    InternalEvent *first;
++    InternalEvent *second;
++    Time time;
++
++    if (second_tail == miEventQueue.nevents)
++        second_tail = 0;
++    first = miEventQueue.events[first_tail].events;
++    second = miEventQueue.events[second_tail].events;
 +    time = first->any.time;
 +    if (time < miEventQueue.lastEventTime &&
 +        miEventQueue.lastEventTime - time < 10000)
 +        time = miEventQueue.lastEventTime;
-+
-+    screen = pDev ? EnqueueScreen(pDev) : NULL;
-+    first_tail = miEventQueue.tail;
-+    second_tail = (first_tail + 1) % miEventQueue.nevents;
-+    first_out = miEventQueue.events[first_tail].events;
-+    second_out = miEventQueue.events[second_tail].events;
-+
-+    memcpy(first_out, first, first->any.length);
-+    memcpy(second_out, second, second->any.length);
-+    first_out->any.time = time;
-+    second_out->any.time = time;
-+
++    first->any.time = time;
++    second->any.time = time;
 +    miEventQueue.events[first_tail].pScreen = screen;
 +    miEventQueue.events[first_tail].pDev = pDev;
 +    miEventQueue.events[second_tail].pScreen = screen;
 +    miEventQueue.events[second_tail].pDev = pDev;
 +    miEventQueue.lastEventTime = time;
-+    miEventQueue.lastMotion = second_is_motion;
-+    miEventQueue.tail = (second_tail + 1) % miEventQueue.nevents;
++    miEventQueue.lastMotion = last_motion;
++    miEventQueue.tail = second_tail + 1;
++    if (miEventQueue.tail == miEventQueue.nevents)
++        miEventQueue.tail = 0;
 +}
 +
-+/*
-+ * AnbryInput-only queue fast path for the common pair:
-+ *   ET_RawMotion followed by ET_Motion for the same device.
-+ *
-+ * This intentionally skips generic verification and per-event branching used
-+ * by mieqEnqueue(). It must only be used by code that has already built these
-+ * two exact event types and still wants normal mieq delivery semantics.
-+ */
-+void
-+mieqEnqueueAInputMotionPair(DeviceIntPtr pDev,
-+                            InternalEvent *raw,
-+                            InternalEvent *motion)
-+{
-+    mieqEnqueueAInputPair(pDev, raw, motion, pDev ? pDev->id : 0);
-+}
-+
-+/*
-+ * AnbryInput-only queue fast path for:
-+ *   ET_RawButtonPress/Release followed by ET_ButtonPress/Release.
-+ */
-+void
-+mieqEnqueueAInputButtonPair(DeviceIntPtr pDev,
-+                            InternalEvent *raw,
-+                            InternalEvent *button)
-+{
-+    mieqEnqueueAInputPair(pDev, raw, button, 0);
-+}
-+
-+/*
-+ * AnbryInput-only queue fast path for:
-+ *   ET_RawKeyPress/Release followed by ET_KeyPress/Release.
-+ */
  /**
   * Changes the screen reference events are being enqueued from.
   * Input events are enqueued with a screen reference and dequeued and

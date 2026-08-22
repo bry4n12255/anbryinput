@@ -150,7 +150,7 @@ make tools
 ### Build with Experimental Xorg/XLibre Patches
 
 AnbryInput can optionally use experimental Xorg/XLibre patches that provide
-faster paths for relative mouse motion and ordinary mouse buttons.
+specialized paths for relative motion and keyboard-event construction.
 
 These patches are **not part of upstream Xorg/XLibre**. They must be applied
 when building your X server. If they are not present, simply build AnbryInput
@@ -158,31 +158,38 @@ normally.
 
 The experimental patch files are:
 
-- `patches/xlibre-relative-motion-2d-fast-path.patch` provides `QueuePointerRelativeMotion2D`
-- `patches/xlibre-ainput-direct-experimental.patch` provides `QueueAInputRelativeMotion2DRawTimed` and `QueueAInputButton`
-- `patches/xorg-ainput-direct-experimental.patch` provides `QueueAInputRelativeMotion2DRawTimed` and `QueueAInputButton`
+- `patches/xlibre-ainput-direct-experimental.patch` provides `QueueAInputRelativeMotion2DRawTimed` and `QueueAInputKeyTimed`
+- `patches/xorg-ainput-direct-experimental.patch` provides `QueueAInputRelativeMotion2DRawTimed` and `QueueAInputKeyTimed`
 
-Wheel buttons still use the normal Xorg/XLibre path so scroll behavior stays
-compatible.
+Each patch is focused on the latest stable release of its respective X server.
 
-#### Fast Relative Motion
-
-Uses a small X server helper (`QueuePointerRelativeMotion2D`) that avoids some
-generic event setup while still going through the normal Xorg input pipeline.
-
-```sh
-make XSERVER_FAST_REL2D=1
-```
+Buttons use the normal Xorg/XLibre path.
 
 #### Direct AnbryInput Path
 
-Uses dedicated X server fast paths (`QueueAInputRelativeMotion2DRawTimed`
-and `QueueAInputButton`) written specifically for AnbryInput. It bypasses much
-of the generic pointer/button event generation while still producing the
-expected XInput events. Keyboard events intentionally remain on the server's
-validated `QueueKeyboardEvents` path because their low event rate does not
-justify bypassing queue validation. Direct events still use the server's
-standard XI2 wire conversion for compatibility with all clients.
+Uses `QueueAInputRelativeMotion2DRawTimed` and `QueueAInputKeyTimed`, written
+specifically for AnbryInput. The motion helper skips the generic public
+wrapper and scroll-axis scan, preserves the kernel event timestamp, and
+enqueues the common raw/motion pair with one queue-capacity check. For the
+driver's unbounded relative two-axis mouse it uses a narrow construction path
+that avoids copying and clearing a `MAX_VALUATORS` mask, skips the default
+identity transform, and removes branches for buttons, absolute devices,
+acceleration, and raw-only modes. It still uses the server's original
+positioning, barrier, confinement, screen-crossing, history, and slave/master
+helpers. Unexpected axis modes, ranges, or counts fall back to the complete
+`fill_pointer_events()` path. The keyboard helper constructs the standard
+raw-key/key pair directly and retains normal downstream XKB, focus, grab,
+master-device, and XI2 processing.
+
+The patch is additive: it does not rewrite the server's generic event or
+pointer paths. Its entry points run only when an AnbryInput module built with
+`XSERVER_DIRECT=1` calls them; every other driver keeps the original behavior.
+
+The earlier hand-written pointer-positioning and button helpers were removed
+after real-world testing exposed incorrect focus, multi-screen boundary, and
+button handling. The current motion helper deliberately shares the normal
+server positioning core. Do not combine a current driver with the obsolete
+`XSERVER_FAST_REL2D` patch or option.
 
 ```sh
 make XSERVER_DIRECT=1
@@ -353,6 +360,23 @@ XInput2 event reaching the benchmark process. It reports percentiles such as
 `p50_ms`, `p95_ms`, and `p99_ms`. Prefer percentiles over `max_ms`; isolated max
 spikes can come from scheduling noise or test timing.
 
+To compare CPU work in Xorg/XLibre, run the latency tool while attaching
+`perf stat` to the server process from another terminal:
+
+```sh
+sudo perf stat \
+  -e cycles,instructions,branches,branch-misses,cache-misses \
+  -p "$(pidof Xorg)" -- sleep 15
+```
+
+Use the same sample count and test duration for both builds, then divide the
+reported cycles and instructions by the number of matched samples. These
+figures include other work performed by the X server during the interval, so
+compare alternating runs on the same session and avoid moving windows or
+running unrelated clients. End-to-end `p50`, `p95`, and `p99` from
+`mouse_latency_xi2` remain the deciding measurements; fewer instructions in
+the driver are useful only when they reduce those delivery times or CPU use.
+
 ## Example Results
 
 These are example results from one system, not a universal guarantee.
@@ -398,6 +422,36 @@ microseconds, but it was repeatable in this test.
 Different kernels, schedulers, mice, USB controllers, WMs, compositors, and games
 can change the results. Measure on your own system.
 
+### Additional Arch Linux Results
+
+A later comparison was run on Arch Linux with the Zen kernel, the same Dell
+Precision 7530 and Logitech G203 LIGHTSYNC, `scx_flash -m all`, the `powersave`
+governor, and a maximum CPU frequency of 3.5 GHz. Each value below is the
+average of three runs with 5000 recorded samples and 128 discarded warmup
+samples. The complete outputs are in `tools/new_test_raw.txt` and
+`tools/new_test_motion.txt`.
+
+| Driver | Mode | mean | p50 | p90 | p95 | p99 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| AnbryInput (`ainput`) | XI_RawMotion | 0.091 ms | 0.087 ms | 0.109 ms | 0.116 ms | 0.222 ms |
+| libinput | XI_RawMotion | 0.103 ms | 0.100 ms | 0.120 ms | 0.126 ms | 0.241 ms |
+| AnbryInput (`ainput`) | XI_Motion | 0.095 ms | 0.091 ms | 0.114 ms | 0.121 ms | 0.210 ms |
+| libinput | XI_Motion | 0.105 ms | 0.100 ms | 0.123 ms | 0.131 ms | 0.235 ms |
+
+AnbryInput remained faster in every reported percentile, with an advantage of
+roughly 8-13% in this run. Absolute latency was higher and the relative
+advantage was smaller than in the earlier CachyOS result. This is not enough
+to identify a driver regression because the kernel, distribution, X server
+version, and other system components were not held constant between the two
+series.
+
+Results from additional clean computers are required before drawing broader
+performance conclusions. Ideally, contributors should compare AnbryInput and
+libinput after a fresh boot on the same machine, alternate the test order, run
+at least three repetitions per mode, record the exact kernel and X server
+versions, and avoid background workloads. Tests on different CPUs, USB
+controllers, polling rates, and distributions are especially useful.
+
 ## Troubleshooting
 
 Check that Xorg/XLibre loaded AnbryInput:
@@ -418,6 +472,17 @@ If `AInput Sensitivity` is missing, verify that the correct device matched your
 If sensitivity changes with `xinput set-prop` but movement does not change,
 check that the device you are changing is the device that actually moves the
 cursor.
+
+`SYN_DROPPED` means the kernel evdev queue overflowed before the X server read
+it; it is not a sensitivity or acceleration message. The driver discards the
+incomplete report, attempts to reconstruct key/button state, and resumes at
+the next complete report. If the state ioctl returns `EAGAIN`, it releases its
+tracked buttons and resumes instead of freezing the device. Repeated drops at
+8000 Hz still indicate that the server was unable to drain input promptly. A
+read callback handles at most 256 events so a continuously busy device cannot
+starve window, focus, rendering, or DPMS work in the X server. Compare 1000 Hz
+and 8000 Hz and check CPU, scheduler, GPU-driver, and suspend behavior when
+reporting the issue.
 
 ## Contributing
 

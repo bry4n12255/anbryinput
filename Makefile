@@ -12,6 +12,12 @@ OPTFLAGS ?= -O2
 CFLAGS   ?= -Wall
 LDFLAGS  ?=
 
+# Keep the common misspelling from silently disabling the requested profile.
+ifeq ($(AGGRESIVE),1)
+$(warning AGGRESIVE is misspelled; use AGGRESSIVE=1)
+AGGRESSIVE := 1
+endif
+
 ifeq ($(AGGRESSIVE),1)
 OPTFLAGS = -O3 -flto
 LDFLAGS += -flto
@@ -19,10 +25,6 @@ endif
 
 ifeq ($(NATIVE),1)
 OPTFLAGS += -march=native -mtune=native
-endif
-
-ifeq ($(XSERVER_FAST_REL2D),1)
-CPPFLAGS += -DAINPUT_XSERVER_FAST_REL2D
 endif
 
 ifeq ($(XSERVER_DIRECT),1)
@@ -54,7 +56,13 @@ $(LATENCY_TOOL): tools/mouse_latency_xi2.c
 	$(CC) $(CPPFLAGS) $(OPTFLAGS) $(CFLAGS) $(TOOL_CFLAGS) $(LDFLAGS) tools/mouse_latency_xi2.c -o $(LATENCY_TOOL) $(XI_LIBS)
 
 install: $(DRIVER)
-	$(INSTALL) -Dm755 $(DRIVER) $(DESTDIR)$(DRIVER_DIR)/$(DRIVER)
+	$(INSTALL) -d "$(DESTDIR)$(DRIVER_DIR)"
+	@set -eu; \
+	tmp=$$(mktemp "$(DESTDIR)$(DRIVER_DIR)/.$(DRIVER).XXXXXX"); \
+	trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
+	$(INSTALL) -m755 "$(DRIVER)" "$$tmp"; \
+	mv -f "$$tmp" "$(DESTDIR)$(DRIVER_DIR)/$(DRIVER)"; \
+	trap - EXIT HUP INT TERM
 
 uninstall:
 	$(RM) $(DESTDIR)$(DRIVER_DIR)/$(DRIVER)
