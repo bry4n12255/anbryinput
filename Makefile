@@ -12,7 +12,7 @@ OPTFLAGS ?= -O2
 CFLAGS   ?= -Wall
 LDFLAGS  ?=
 
-# Keep the common misspelling from silently disabling the requested profile.
+# I will still maintain it
 ifeq ($(AGGRESIVE),1)
 $(warning AGGRESIVE is misspelled; use AGGRESSIVE=1)
 AGGRESSIVE := 1

@@ -2,11 +2,10 @@ diff --git a/dix/getevents.c b/dix/getevents.c
 index 32bafe2..3df04c3 100644
 --- a/dix/getevents.c
 +++ b/dix/getevents.c
-@@ -1292,6 +1292,54 @@ QueuePointerEvents(DeviceIntPtr device, int type,
+@@ -1292,6 +1292,51 @@ QueuePointerEvents(DeviceIntPtr device, int type,
      queueEventList(device, InputEventList, nevents);
  }
 
-+/* Experimental AnbryInput-only keyboard construction path. */
 +void
 +QueueAInputKeyTimed(DeviceIntPtr device, int keycode, int is_down, CARD32 ms)
 +{
@@ -21,13 +20,11 @@ index 32bafe2..3df04c3 100644
 +        !device->kbdfeed || keycode < 8 || keycode > 255)
 +        return;
 +
-+    /* Let the regular path validate the uncommon repeat case. */
 +    if (is_down && key_is_down(device, keycode, KEY_POSTED)) {
 +        QueueKeyboardEvents(device, type, keycode);
 +        return;
 +    }
 +
-+    /* A slave switch requires the regular DeviceChanged prefix event. */
 +    master = GetMaster(device, MASTER_KEYBOARD);
 +    if (master && master->last.slave != device) {
 +        QueueKeyboardEvents(device, type, keycode);
@@ -57,115 +54,18 @@ index 32bafe2..3df04c3 100644
  /**
   * Helper function for GetPointerEvents, which only generates motion and
   * raw motion events for the slave device: does not update the master device.
-@@ -1722,6 +1770,146 @@ GetPointerEvents(InternalEvent *events, DeviceIntPtr pDev, int type,
+@@ -1722,6 +1767,29 @@ GetPointerEvents(InternalEvent *events, DeviceIntPtr pDev, int type,
      return num_events;
  }
 
-+static Bool
-+ainput_relative_transform_is_identity(const DeviceIntPtr device)
-+{
-+    const struct pixman_f_transform *m = &device->relative_transform;
-+
-+    return m->m[0][0] == 1.0 && m->m[0][1] == 0.0 && m->m[0][2] == 0.0 &&
-+           m->m[1][0] == 0.0 && m->m[1][1] == 1.0 && m->m[1][2] == 0.0 &&
-+           m->m[2][0] == 0.0 && m->m[2][1] == 0.0 && m->m[2][2] == 1.0;
-+}
-+
-+static Bool
-+ainput_can_specialize_relative_2d(const DeviceIntPtr device)
-+{
-+    const ValuatorClassPtr v = device->valuator;
-+
-+    return v->numAxes == 2 &&
-+           (v->axes[0].mode & DeviceMode) == Relative &&
-+           (v->axes[1].mode & DeviceMode) == Relative &&
-+           v->axes[0].max_value <= v->axes[0].min_value &&
-+           v->axes[1].max_value <= v->axes[1].min_value;
-+}
-+
-+/*
-+ * Narrow version of fill_pointer_events() for AnbryInput's unbounded,
-+ * relative, two-axis mouse.  Keep the shared positioning/history helpers so
-+ * barriers, confinement, screen crossing and master/slave state retain the
-+ * normal server semantics.  The caller falls back to fill_pointer_events()
-+ * whenever these invariants are not true.
-+ */
-+static int
-+fill_ainput_relative_motion_2d(InternalEvent *events, DeviceIntPtr device,
-+                               CARD32 ms, double dx, double dy,
-+                               double raw_dx, double raw_dy)
-+{
-+    RawDeviceEvent *raw = &events->raw_event;
-+    DeviceEvent *event;
-+    ValuatorMask mask;
-+    ScreenPtr scr;
-+    double devx, devy, screenx, screeny;
-+    int num_barrier_events = 0;
-+    int num_events = 1;
-+
-+    init_raw(device, raw, ms, MotionNotify, 0);
-+    SetBit(raw->valuators.mask, 0);
-+    SetBit(raw->valuators.mask, 1);
-+    raw->valuators.data_raw[0] = raw_dx;
-+    raw->valuators.data_raw[1] = raw_dy;
-+    events++;
-+
-+    /* Only fields reachable through last_bit are initialized.  This avoids
-+     * zeroing and copying the full MAX_VALUATORS-sized mask on every report. */
-+    mask.last_bit = 1;
-+    mask.has_unaccelerated = FALSE;
-+    mask.mask[0] = 0x3;
-+    mask.valuators[0] = dx;
-+    mask.valuators[1] = dy;
-+
-+    if (!ainput_relative_transform_is_identity(device))
-+        transformRelative(device, &mask);
-+
-+    set_raw_valuators(raw, &mask, FALSE, raw->valuators.data);
-+    moveRelative(device, POINTER_RELATIVE, &mask);
-+
-+    devx = screenx = valuator_mask_isset(&mask, 0) ?
-+        valuator_mask_get_double(&mask, 0) : device->last.valuators[0];
-+    devy = screeny = valuator_mask_isset(&mask, 1) ?
-+        valuator_mask_get_double(&mask, 1) : device->last.valuators[1];
-+
-+    scr = positionSprite(device, Relative, &mask, &devx, &devy,
-+                         &screenx, &screeny, &num_barrier_events, events);
-+    num_events += num_barrier_events;
-+    events += num_barrier_events;
-+
-+    updateHistory(device, &mask, ms);
-+    storeLastValuators(device, &mask, 0, 1, devx, devy);
-+
-+    if (!IsMaster(device) && !IsFloating(device)) {
-+        DeviceIntPtr master = GetMaster(device, MASTER_POINTER);
-+
-+        master->last.valuators[0] = screenx;
-+        master->last.valuators[1] = screeny;
-+    }
-+
-+    event = &events->device_event;
-+    init_device_event(event, device, ms, EVENT_SOURCE_NORMAL);
-+    event->type = ET_Motion;
-+    event->detail.button = 0;
-+    event_set_root_coordinates(event, screenx - scr->x, screeny - scr->y);
-+    set_valuators(device, event, &mask);
-+
-+    return num_events + 1;
-+}
-+
-+/* AnbryInput relative-motion path with normal pointer semantics. */
 +void
 +QueueAInputRelativeMotion2DRawTimed(DeviceIntPtr device, double dx, double dy,
 +                                    double raw_dx, double raw_dy, CARD32 ms)
 +{
 +    InternalEvent *events = InputEventList;
 +    InternalEvent *out;
-+    InternalEvent *first;
-+    InternalEvent *second;
 +    ValuatorMask mask;
 +    int num_events = 0;
-+    int generated;
 +
 +    if (!device || !device->enabled || !device->valuator ||
 +        device->valuator->numAxes < 2 || !miPointerGetScreen(device))
@@ -173,32 +73,12 @@ index 32bafe2..3df04c3 100644
 +
 +    out = UpdateFromMaster(events, device, DEVCHANGE_POINTER_EVENT,
 +                           &num_events);
-+    if (ainput_can_specialize_relative_2d(device)) {
-+        generated = fill_ainput_relative_motion_2d(out, device, ms, dx, dy,
-+                                                   raw_dx, raw_dy);
-+    }
-+    else {
-+        valuator_mask_zero(&mask);
-+        valuator_mask_set_unaccelerated(&mask, 0, dx, raw_dx);
-+        valuator_mask_set_unaccelerated(&mask, 1, dy, raw_dy);
-+        generated = fill_pointer_events(out, device, MotionNotify, 0, ms,
-+                                        POINTER_RELATIVE, &mask);
-+    }
-+    num_events += generated;
-+
-+    if (num_events == 2) {
-+        if (mieqReserveAInputPair(&first, &second)) {
-+            memcpy(first, &events[0], events[0].any.length);
-+            memcpy(second, &events[1], events[1].any.length);
-+            mieqCommitAInputPair(device, device->id);
-+        }
-+        else {
-+            queueEventList(device, events, num_events);
-+        }
-+    }
-+    else {
-+        queueEventList(device, events, num_events);
-+    }
++    valuator_mask_zero(&mask);
++    valuator_mask_set_unaccelerated(&mask, 0, dx, raw_dx);
++    valuator_mask_set_unaccelerated(&mask, 1, dy, raw_dy);
++    num_events += fill_pointer_events(out, device, MotionNotify, 0, ms,
++                                      POINTER_RELATIVE, &mask);
++    queueEventList(device, events, num_events);
 +}
 +
  /**
@@ -232,10 +112,10 @@ index 8b0a231..48fd543 100644
                                    InternalEvent *       /*e */
      );
 
-+extern _X_HIDDEN Bool mieqReserveAInputPair(InternalEvent ** /*first */,
-+                                            InternalEvent ** /*second */);
-+extern _X_HIDDEN void mieqCommitAInputPair(DeviceIntPtr /*pDev */,
-+                                           int /*last_motion */);
++extern _X_HIDDEN Bool mieqReserveAInputPair(InternalEvent **first,
++                                            InternalEvent **second);
++extern _X_HIDDEN void mieqCommitAInputPair(DeviceIntPtr pDev,
++                                           int last_motion);
 +
  extern _X_EXPORT void mieqSwitchScreen(DeviceIntPtr /* pDev */ ,
                                         ScreenPtr /*pScreen */ ,

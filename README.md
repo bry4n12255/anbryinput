@@ -170,16 +170,12 @@ Buttons use the normal Xorg/XLibre path.
 Uses `QueueAInputRelativeMotion2DRawTimed` and `QueueAInputKeyTimed`, written
 specifically for AnbryInput. The motion helper skips the generic public
 wrapper and scroll-axis scan, preserves the kernel event timestamp, and
-enqueues the common raw/motion pair with one queue-capacity check. For the
-driver's unbounded relative two-axis mouse it uses a narrow construction path
-that avoids copying and clearing a `MAX_VALUATORS` mask, skips the default
-identity transform, and removes branches for buttons, absolute devices,
-acceleration, and raw-only modes. It still uses the server's original
-positioning, barrier, confinement, screen-crossing, history, and slave/master
-helpers. Unexpected axis modes, ranges, or counts fall back to the complete
-`fill_pointer_events()` path. The keyboard helper constructs the standard
-raw-key/key pair directly and retains normal downstream XKB, focus, grab,
-master-device, and XI2 processing.
+passes its relative two-axis mask directly to the server's original
+`fill_pointer_events()` and queue helpers. This deliberately keeps the normal
+transform, positioning, barrier, confinement, screen-crossing, history,
+master/slave, validation, and queue semantics. The keyboard helper constructs
+the standard raw-key/key pair directly and retains normal downstream XKB,
+focus, grab, master-device, and XI2 processing.
 
 The patch is additive: it does not rewrite the server's generic event or
 pointer paths. Its entry points run only when an AnbryInput module built with
@@ -262,6 +258,7 @@ Section "InputClass"
     Option "Sensitivity" "1.0"
     Option "DPI" "1000"
     Option "ReferenceDPI" "1000"
+    Option "ReadBudget" "2"
 EndSection
 ```
 
@@ -276,6 +273,7 @@ Section "InputClass"
 
     Option "Type" "keyboard"
     Option "xkb_layout" "us"
+    Option "ReadBudget" "1"
 EndSection
 ```
 
@@ -290,8 +288,38 @@ Default options:
 | `Sensitivity` | `1.0` | Runtime changes are exposed as `AInput Sensitivity`. |
 | `DPI` | `1000` | Used for relative mouse DPI normalization. |
 | `ReferenceDPI` | `1000` | Baseline DPI for the sensitivity formula. |
+| `ReadBudget` | `4` | Full 256-event reads allowed per callback: `1`, `2`, `4`, or `8`. |
 | `xkb_layout` | `us` | Keyboard layout fallback. |
 | `xkb_variant` | unset | Example for Brazilian ABNT2: `abnt2`. |
+
+## Read Budget
+
+`ReadBudget` is a per-device fairness limit, not the device polling rate. Each
+callback reads a fixed array of up to 256 Linux input events. The driver only
+attempts another nonblocking `read()` when the previous array was completely
+full, and stops after `ReadBudget` reads or as soon as no more data is
+immediately available. It never waits for new events.
+
+A larger value can drain an accumulated high-polling-rate mouse backlog with
+fewer Xserver wakeups. The tradeoff is that the mouse callback can process and
+queue more events before the Xserver services the keyboard, another pointer,
+or other work. Values such as `4` and `8` can therefore hurt fairness under a
+sustained input flood even though they do not normally change anything when
+the first read contains fewer than 256 events.
+
+Recommended starting values:
+
+| Device/workload | `ReadBudget` |
+| --- | --- |
+| Keyboard | `1` |
+| Mouse up to 1 kHz | `1` |
+| Mouse from 2 kHz through 8 kHz | `2` |
+| Backlog/throughput experiments | `4` or `8` |
+
+The accepted values are `1`, `2`, `4`, and `8`. Omitting the option uses the
+driver default of `1`; it does not disable input. Configure it in each
+device's `InputClass` when different devices need different limits. Do not set
+it to `1000`, `8000`, or another polling-rate value.
 
 ## Sensitivity And DPI
 

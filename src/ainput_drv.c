@@ -70,10 +70,11 @@ extern void QueueAInputRelativeMotion2DRawTimed(DeviceIntPtr pDev,
 #define DRIVER_VERSION 1
 #define AINPUT_VERSION_MAJOR 1
 #define AINPUT_VERSION_MINOR 7
-#define AINPUT_VERSION_PATCH 0
+#define AINPUT_VERSION_PATCH 1
 
 #define PROP_SENSITIVITY "AInput Sensitivity"
 #define AINPUT_EVENT_BATCH 256
+#define AINPUT_DEFAULT_READ_BUDGET 1
 #define AINPUT_DEFAULT_SENSITIVITY 1.0f
 #define AINPUT_DEFAULT_DPI 1000.0f
 #define AINPUT_DEFAULT_LAYOUT "us"
@@ -104,6 +105,7 @@ typedef struct
     int acc_x, acc_y;
     int scroll_pending;
     int sync_dropped;
+    unsigned int read_budget;
 #ifdef AINPUT_XSERVER_DIRECT
     int kernel_clock_monotonic;
 #endif
@@ -140,8 +142,7 @@ static inline void ainput_update_effective_sensitivity(AInputPriv *priv)
     if (priv->is_absolute || priv->dpi <= 0.0f || priv->reference_dpi <= 0.0f)
         priv->effective_sensitivity = (double)priv->sensitivity;
     else
-        priv->effective_sensitivity = (double)priv->sensitivity *
-                                      ((double)priv->reference_dpi / (double)priv->dpi);
+        priv->effective_sensitivity = (double)priv->sensitivity * ((double)priv->reference_dpi / (double)priv->dpi);
 }
 
 static void ainput_apply_sensitivity(AInputPriv *priv, float new_sens)
@@ -201,7 +202,6 @@ static inline void ainput_post_relative_motion(AInputPriv *priv,
     (void)priv;
     (void)ev;
 
-    /* Never mix a previous mask representation with raw valuators. */
     valuator_mask_zero(mask);
     valuator_mask_set_unaccelerated(mask, 0, dx, raw_dx);
     valuator_mask_set_unaccelerated(mask, 1, dy, raw_dy);
@@ -251,8 +251,10 @@ ainput_flush_scroll_axis(InputInfoPtr pInfo, int *steps, int *hi_res_frame,
                          int *remainder, int horizontal)
 {
     if (*steps) {
-        /* REL_WHEEL represents the same movement as REL_WHEEL_HI_RES.
-         * Prefer its discrete count when both occur in one report. */
+        /*
+         * REL_WHEEL represents the same movement as REL_WHEEL_HI_RES.
+         * Prefer its discrete count when both occur in one report.
+        */
         ainput_post_scroll_steps(pInfo, *steps, horizontal);
         *remainder = 0;
     }
@@ -361,8 +363,13 @@ static void ainput_resync_state(InputInfoPtr pInfo)
 {
     AInputPriv *priv = pInfo->private;
     unsigned long current[NBITS(KEY_MAX)] = {0};
+    int result;
 
-    if (ioctl(pInfo->fd, EVIOCGKEY(sizeof(current)), current) != 0)
+    do
+        result = ioctl(pInfo->fd, EVIOCGKEY(sizeof(current)), current);
+    while (result < 0 && errno == EINTR);
+
+   if (result < 0)
     {
         int error = errno;
 
@@ -376,9 +383,6 @@ static void ainput_resync_state(InputInfoPtr pInfo)
                     pInfo->name, error, strerror(error),
                     priv->resync_query_failures);
 
-        /* Relative deltas cannot be reconstructed.  If the optional state
-         * query is temporarily unavailable, resume instead of freezing the
-         * entire device waiting for an ioctl that may keep returning EAGAIN. */
         ainput_release_tracked_state(pInfo);
         priv->has_last_abs = 0;
         priv->sync_dropped = 0;
@@ -529,11 +533,14 @@ static void ainput_read_keyboard(InputInfoPtr pInfo)
 {
     AInputPriv *priv = pInfo->private;
     struct input_event events[AINPUT_EVENT_BATCH];
-    ssize_t len;
+    ssize_t len = 0;
 
-    len = read(pInfo->fd, events, sizeof(events));
-    if (len > 0)
+    for (unsigned int batch = 0; batch < priv->read_budget; batch++)
     {
+        len = read(pInfo->fd, events, sizeof(events));
+        if (len <= 0)
+            break;
+
         priv->last_read_error = 0;
         size_t count = (size_t)len / sizeof(events[0]);
 
@@ -564,6 +571,9 @@ static void ainput_read_keyboard(InputInfoPtr pInfo)
                 ainput_track_key(priv, ev->code, ev->value != 0);
             }
         }
+
+        if ((size_t)len < sizeof(events))
+            break;
     }
 
     ainput_report_read_end(pInfo, len);
@@ -578,11 +588,14 @@ static void ainput_read_relative_mouse(InputInfoPtr pInfo)
     double sens = priv->effective_sensitivity;
     int acc_x = priv->acc_x;
     int acc_y = priv->acc_y;
-    ssize_t len;
+    ssize_t len = 0;
 
-    len = read(pInfo->fd, events, sizeof(events));
-    if (len > 0)
+    for (unsigned int batch = 0; batch < priv->read_budget; batch++)
     {
+        len = read(pInfo->fd, events, sizeof(events));
+        if (len <= 0)
+            break;
+
         priv->last_read_error = 0;
         size_t count = (size_t)len / sizeof(events[0]);
 
@@ -678,6 +691,9 @@ static void ainput_read_relative_mouse(InputInfoPtr pInfo)
                 break;
             }
         }
+
+        if ((size_t)len < sizeof(events))
+            break;
     }
 
     priv->acc_x = acc_x;
@@ -691,11 +707,14 @@ static void ainput_read_absolute_mouse(InputInfoPtr pInfo)
     DeviceIntPtr dev = pInfo->dev;
     ValuatorMask *motion_mask = priv->motion_mask;
     struct input_event events[AINPUT_EVENT_BATCH];
-    ssize_t len;
+    ssize_t len = 0;
 
-    len = read(pInfo->fd, events, sizeof(events));
-    if (len > 0)
+    for (unsigned int batch = 0; batch < priv->read_budget; batch++)
     {
+        len = read(pInfo->fd, events, sizeof(events));
+        if (len <= 0)
+            break;
+
         priv->last_read_error = 0;
         size_t count = (size_t)len / sizeof(events[0]);
 
@@ -845,6 +864,9 @@ static void ainput_read_absolute_mouse(InputInfoPtr pInfo)
                 break;
             }
         }
+
+        if ((size_t)len < sizeof(events))
+            break;
     }
 
     ainput_report_read_end(pInfo, len);
@@ -955,7 +977,6 @@ static int ainput_control(DeviceIntPtr dev, int what)
             priv->fd = pInfo->fd;
             priv->last_read_error = 0;
 #ifdef AINPUT_XSERVER_DIRECT
-            /* logind/libseat may have replaced the evdev fd while off. */
             ainput_configure_event_clock(pInfo, priv);
 #endif
             xf86AddEnabledDevice(pInfo);
@@ -1015,8 +1036,22 @@ static int ainput_open_device(InputInfoPtr pInfo, AInputPriv *priv)
 
 static void ainput_read_options(InputInfoPtr pInfo, AInputPriv *priv)
 {
+    int read_budget;
+
     priv->xkb_layout = xf86FindOptionValue(pInfo->options, "xkb_layout");
     priv->xkb_variant = xf86FindOptionValue(pInfo->options, "xkb_variant");
+
+    read_budget = xf86SetIntOption(pInfo->options, "ReadBudget",
+                                   AINPUT_DEFAULT_READ_BUDGET);
+    if (read_budget != 1 && read_budget != 2 &&
+        read_budget != 4 && read_budget != 8)
+    {
+        xf86Msg(X_WARNING,
+                "%s: invalid ReadBudget=%d; using %d\n",
+                pInfo->name, read_budget, AINPUT_DEFAULT_READ_BUDGET);
+        read_budget = AINPUT_DEFAULT_READ_BUDGET;
+    }
+    priv->read_budget = (unsigned int)read_budget;
 
     priv->sensitivity = ainput_positive_real_option(
         pInfo, "Sensitivity", AINPUT_DEFAULT_SENSITIVITY);
@@ -1106,21 +1141,23 @@ static void ainput_log_pre_init(InputInfoPtr pInfo, const AInputPriv *priv)
     {
         xf86Msg(
             X_INFO,
-            "%s: AInput mouse initialized, sensitivity=%.3f dpi=%.1f reference_dpi=%.1f effective=%.3f\n",
+            "%s: AInput mouse initialized, sensitivity=%.3f dpi=%.1f reference_dpi=%.1f effective=%.3f read_budget=%u\n",
             pInfo->name,
             priv->sensitivity,
             priv->dpi,
             priv->reference_dpi,
-            priv->effective_sensitivity);
+            priv->effective_sensitivity,
+            priv->read_budget);
     }
     else
     {
         xf86Msg(
             X_INFO,
-            "%s: AInput keyboard initialized, layout='%s', variant='%s'\n",
+            "%s: AInput keyboard initialized, layout='%s', variant='%s', read_budget=%u\n",
             pInfo->name,
             priv->xkb_layout ? priv->xkb_layout : AINPUT_DEFAULT_LAYOUT,
-            priv->xkb_variant ? priv->xkb_variant : "default");
+            priv->xkb_variant ? priv->xkb_variant : "default",
+            priv->read_budget);
     }
 }
 
