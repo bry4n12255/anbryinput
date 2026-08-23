@@ -288,7 +288,7 @@ Default options:
 | `Sensitivity` | `1.0` | Runtime changes are exposed as `AInput Sensitivity`. |
 | `DPI` | `1000` | Used for relative mouse DPI normalization. |
 | `ReferenceDPI` | `1000` | Baseline DPI for the sensitivity formula. |
-| `ReadBudget` | `4` | Full 256-event reads allowed per callback: `1`, `2`, `4`, or `8`. |
+| `ReadBudget` | `1` | Full 256-event reads allowed per callback: `1`, `2`, `4`, or `8`. |
 | `xkb_layout` | `us` | Keyboard layout fallback. |
 | `xkb_variant` | unset | Example for Brazilian ABNT2: `abnt2`. |
 
