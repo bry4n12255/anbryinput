@@ -158,8 +158,8 @@ normally.
 
 The experimental patch files are:
 
-- `patches/xlibre-ainput-direct-experimental.patch` provides `QueueAInputRelativeMotion2DRawTimed` and `QueueAInputKeyTimed`
-- `patches/xorg-ainput-direct-experimental.patch` provides `QueueAInputRelativeMotion2DRawTimed` and `QueueAInputKeyTimed`
+- `patches/xlibre-ainput-direct-experimental.patch` provides `QueueAInputRelativeMotion2DRaw` and `QueueAInputKey`
+- `patches/xorg-ainput-direct-experimental.patch` provides `QueueAInputRelativeMotion2DRaw` and `QueueAInputKey`
 
 Each patch is focused on the latest stable release of its respective X server.
 
@@ -167,15 +167,19 @@ Buttons use the normal Xorg/XLibre path.
 
 #### Direct AnbryInput Path
 
-Uses `QueueAInputRelativeMotion2DRawTimed` and `QueueAInputKeyTimed`, written
+Uses `QueueAInputRelativeMotion2DRaw` and `QueueAInputKey`, written
 specifically for AnbryInput. The motion helper skips the generic public
-wrapper and scroll-axis scan, preserves the kernel event timestamp, and
-passes its relative two-axis mask directly to the server's original
+wrapper and scroll-axis scan, and passes its relative two-axis mask directly
+to the server's original
 `fill_pointer_events()` and queue helpers. This deliberately keeps the normal
 transform, positioning, barrier, confinement, screen-crossing, history,
 master/slave, validation, and queue semantics. The keyboard helper constructs
 the standard raw-key/key pair directly and retains normal downstream XKB,
 focus, grab, master-device, and XI2 processing.
+
+Both helpers use the X server's current event time, matching the normal input
+path. Kernel timestamps are not mixed with server-timestamped buttons and
+scroll events.
 
 The patch is additive: it does not rewrite the server's generic event or
 pointer paths. Its entry points run only when an AnbryInput module built with
@@ -288,7 +292,7 @@ Default options:
 | `Sensitivity` | `1.0` | Runtime changes are exposed as `AInput Sensitivity`. |
 | `DPI` | `1000` | Used for relative mouse DPI normalization. |
 | `ReferenceDPI` | `1000` | Baseline DPI for the sensitivity formula. |
-| `ReadBudget` | `4` | Full 256-event reads allowed per callback: `1`, `2`, `4`, or `8`. |
+| `ReadBudget` | `1` | Full 256-event reads allowed per callback: `1`, `2`, `4`, or `8`. |
 | `xkb_layout` | `us` | Keyboard layout fallback. |
 | `xkb_variant` | unset | Example for Brazilian ABNT2: `abnt2`. |
 
@@ -320,6 +324,27 @@ The accepted values are `1`, `2`, `4`, and `8`. Omitting the option uses the
 driver default of `1`; it does not disable input. Configure it in each
 device's `InputClass` when different devices need different limits. Do not set
 it to `1000`, `8000`, or another polling-rate value.
+
+To check whether events remain available after a callback exhausts its read
+budget, build the driver with the compile-time diagnostic enabled:
+
+```sh
+make clean
+make READ_BUDGET_DEBUG=1
+```
+
+After the configured number of successful reads, the diagnostic polls the FD
+without consuming another event and produces an entry in `Xorg.0.log`:
+
+```text
+ReadBudget debug: reads=1/1 events=256 more_events=yes
+```
+
+`more_events=yes` means that the budget ended while the device was still
+readable, so a larger value could drain more of that backlog in the same
+callback. `more_events=no` means no additional event was immediately available
+at that snapshot. Rebuild without `READ_BUDGET_DEBUG=1` after testing: the
+extra `poll()` and logging alter timing and invalidate latency measurements.
 
 ## Sensitivity And DPI
 

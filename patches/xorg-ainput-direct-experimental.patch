@@ -2,12 +2,12 @@ diff --git a/dix/getevents.c b/dix/getevents.c
 index 32bafe2..3df04c3 100644
 --- a/dix/getevents.c
 +++ b/dix/getevents.c
-@@ -1292,6 +1292,51 @@ QueuePointerEvents(DeviceIntPtr device, int type,
+@@ -1292,6 +1292,52 @@ QueuePointerEvents(DeviceIntPtr device, int type,
      queueEventList(device, InputEventList, nevents);
  }
 
 +void
-+QueueAInputKeyTimed(DeviceIntPtr device, int keycode, int is_down, CARD32 ms)
++QueueAInputKey(DeviceIntPtr device, int keycode, int is_down)
 +{
 +    InternalEvent *raw_slot;
 +    InternalEvent *event_slot;
@@ -15,6 +15,7 @@ index 32bafe2..3df04c3 100644
 +    DeviceEvent *event;
 +    DeviceIntPtr master;
 +    int type = is_down ? KeyPress : KeyRelease;
++    CARD32 ms = GetTimeInMillis();
 +
 +    if (!device || !device->enabled || !device->key || !device->focus ||
 +        !device->kbdfeed || keycode < 8 || keycode > 255)
@@ -54,18 +55,19 @@ index 32bafe2..3df04c3 100644
  /**
   * Helper function for GetPointerEvents, which only generates motion and
   * raw motion events for the slave device: does not update the master device.
-@@ -1722,6 +1767,29 @@ GetPointerEvents(InternalEvent *events, DeviceIntPtr pDev, int type,
+@@ -1722,6 +1768,30 @@ GetPointerEvents(InternalEvent *events, DeviceIntPtr pDev, int type,
      return num_events;
  }
 
 +void
-+QueueAInputRelativeMotion2DRawTimed(DeviceIntPtr device, double dx, double dy,
-+                                    double raw_dx, double raw_dy, CARD32 ms)
++QueueAInputRelativeMotion2DRaw(DeviceIntPtr device, double dx, double dy,
++                               double raw_dx, double raw_dy)
 +{
 +    InternalEvent *events = InputEventList;
 +    InternalEvent *out;
 +    ValuatorMask mask;
 +    int num_events = 0;
++    CARD32 ms = GetTimeInMillis();
 +
 +    if (!device || !device->enabled || !device->valuator ||
 +        device->valuator->numAxes < 2 || !miPointerGetScreen(device))
@@ -88,18 +90,16 @@ diff --git a/include/input.h b/include/input.h
 index cdb5d5a..cf7a32b 100644
 --- a/include/input.h
 +++ b/include/input.h
-@@ -476,6 +476,15 @@ extern _X_EXPORT void QueuePointerEvents(DeviceIntPtr pDev,
+@@ -476,6 +476,13 @@ extern _X_EXPORT void QueuePointerEvents(DeviceIntPtr pDev,
                                           int buttons,
                                           int flags, const ValuatorMask *mask);
 
-+extern _X_EXPORT void QueueAInputKeyTimed(DeviceIntPtr pDev,
-+                                          int keycode, int is_down,
-+                                          CARD32 time_ms);
-+extern _X_EXPORT void QueueAInputRelativeMotion2DRawTimed(DeviceIntPtr pDev,
-+                                                          double dx, double dy,
-+                                                          double raw_dx,
-+                                                          double raw_dy,
-+                                                          CARD32 time_ms);
++extern _X_EXPORT void QueueAInputKey(DeviceIntPtr pDev,
++                                     int keycode, int is_down);
++extern _X_EXPORT void QueueAInputRelativeMotion2DRaw(DeviceIntPtr pDev,
++                                                     double dx, double dy,
++                                                     double raw_dx,
++                                                     double raw_dy);
 +
  extern _X_EXPORT int GetKeyboardEvents(InternalEvent *events,
                                         DeviceIntPtr pDev,

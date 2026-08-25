@@ -9,9 +9,6 @@
  * scope.
  */
 #include <linux/input-event-codes.h>
-#ifndef CLOCK_MONOTONIC
-#define CLOCK_MONOTONIC 1
-#endif
 
 #include <stdlib.h>
 #include <stdint.h>
@@ -19,7 +16,6 @@
 #include <strings.h>
 #include <errno.h>
 #include <math.h>
-#include <time.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -58,19 +54,17 @@
  *   make XSERVER_DIRECT=1
  */
 #ifdef AINPUT_XSERVER_DIRECT
-extern void QueueAInputKeyTimed(DeviceIntPtr pDev, int keycode,
-                                int is_down, uint32_t time_ms);
-extern void QueueAInputRelativeMotion2DRawTimed(DeviceIntPtr pDev,
-                                                double dx, double dy,
-                                                double raw_dx, double raw_dy,
-                                                uint32_t time_ms);
+extern void QueueAInputKey(DeviceIntPtr pDev, int keycode, int is_down);
+extern void QueueAInputRelativeMotion2DRaw(DeviceIntPtr pDev,
+                                           double dx, double dy,
+                                           double raw_dx, double raw_dy);
 #endif
 
 #define DRIVER_NAME "ainput"
 #define DRIVER_VERSION 1
 #define AINPUT_VERSION_MAJOR 1
 #define AINPUT_VERSION_MINOR 7
-#define AINPUT_VERSION_PATCH 1
+#define AINPUT_VERSION_PATCH 2
 
 #define PROP_SENSITIVITY "AInput Sensitivity"
 #define AINPUT_EVENT_BATCH 256
@@ -106,9 +100,6 @@ typedef struct
     int scroll_pending;
     int sync_dropped;
     unsigned int read_budget;
-#ifdef AINPUT_XSERVER_DIRECT
-    int kernel_clock_monotonic;
-#endif
     int last_read_error;
     int is_absolute, has_abs_event;
 
@@ -151,38 +142,6 @@ static void ainput_apply_sensitivity(AInputPriv *priv, float new_sens)
     ainput_update_effective_sensitivity(priv);
 }
 
-#ifdef AINPUT_XSERVER_DIRECT
-static void ainput_configure_event_clock(InputInfoPtr pInfo, AInputPriv *priv)
-{
-    unsigned int clk = CLOCK_MONOTONIC;
-
-    priv->kernel_clock_monotonic =
-        (pInfo->fd >= 0 && ioctl(pInfo->fd, EVIOCSCLOCKID, &clk) == 0);
-    if (!priv->kernel_clock_monotonic && pInfo->fd >= 0)
-    {
-        int error = errno;
-
-        xf86Msg(X_WARNING,
-                "%s: failed to select CLOCK_MONOTONIC for input fd %d "
-                "(errno=%d: %s); using server receive time\n",
-                pInfo->name, pInfo->fd, error, strerror(error));
-    }
-}
-
-static inline uint32_t ainput_event_time_ms(const AInputPriv *priv,
-                                            const struct input_event *ev)
-{
-    if (priv->kernel_clock_monotonic)
-        return (uint32_t)((uint64_t)ev->time.tv_sec * 1000ULL +
-                          (uint64_t)ev->time.tv_usec / 1000ULL);
-
-    struct timespec now;
-    clock_gettime(CLOCK_MONOTONIC, &now);
-    return (uint32_t)((uint64_t)now.tv_sec * 1000ULL +
-                      (uint64_t)now.tv_nsec / 1000000ULL);
-}
-#endif
-
 static inline void ainput_post_relative_motion(AInputPriv *priv,
                                                DeviceIntPtr dev,
                                                ValuatorMask *mask,
@@ -193,8 +152,7 @@ static inline void ainput_post_relative_motion(AInputPriv *priv,
 #ifdef AINPUT_XSERVER_DIRECT
     if (!priv->is_absolute)
     {
-        QueueAInputRelativeMotion2DRawTimed(dev, dx, dy, raw_dx, raw_dy,
-                                            ainput_event_time_ms(priv, ev));
+        QueueAInputRelativeMotion2DRaw(dev, dx, dy, raw_dx, raw_dy);
         return;
     }
 #endif
@@ -273,8 +231,7 @@ static inline void ainput_post_key(InputInfoPtr pInfo, int key_code, int is_down
 #ifdef AINPUT_XSERVER_DIRECT
     if (ev)
     {
-        QueueAInputKeyTimed(pInfo->dev, key_code, is_down,
-                            ainput_event_time_ms(pInfo->private, ev));
+        QueueAInputKey(pInfo->dev, key_code, is_down);
         return;
     }
 #else
@@ -529,11 +486,48 @@ static void ainput_report_read_end(InputInfoPtr pInfo, ssize_t len)
             pInfo->name, pInfo->fd, error, strerror(error));
 }
 
+#ifdef AINPUT_READ_BUDGET_DEBUG
+static void ainput_debug_read_budget(InputInfoPtr pInfo,
+                                     unsigned int reads, size_t events)
+{
+    AInputPriv *priv = pInfo->private;
+    struct pollfd poll_fd = {
+        .fd = pInfo->fd,
+        .events = POLLIN,
+    };
+    int result;
+
+    if (reads != priv->read_budget)
+        return;
+
+    do
+        result = poll(&poll_fd, 1, 0);
+    while (result < 0 && errno == EINTR);
+
+    if (result < 0)
+    {
+        xf86Msg(X_WARNING,
+                "%s: ReadBudget debug poll failed (fd=%d, errno=%d: %s)\n",
+                pInfo->name, pInfo->fd, errno, strerror(errno));
+        return;
+    }
+
+    xf86Msg(X_INFO,
+            "%s: ReadBudget debug: reads=%u/%u events=%zu more_events=%s\n",
+            pInfo->name, reads, priv->read_budget, events,
+            (result > 0 && (poll_fd.revents & POLLIN)) ? "yes" : "no");
+}
+#endif
+
 static void ainput_read_keyboard(InputInfoPtr pInfo)
 {
     AInputPriv *priv = pInfo->private;
     struct input_event events[AINPUT_EVENT_BATCH];
     ssize_t len = 0;
+#ifdef AINPUT_READ_BUDGET_DEBUG
+    unsigned int debug_reads = 0;
+    size_t debug_events = 0;
+#endif
 
     for (unsigned int batch = 0; batch < priv->read_budget; batch++)
     {
@@ -543,6 +537,10 @@ static void ainput_read_keyboard(InputInfoPtr pInfo)
 
         priv->last_read_error = 0;
         size_t count = (size_t)len / sizeof(events[0]);
+#ifdef AINPUT_READ_BUDGET_DEBUG
+        debug_reads++;
+        debug_events += count;
+#endif
 
         for (size_t i = 0; i < count; i++)
         {
@@ -576,6 +574,9 @@ static void ainput_read_keyboard(InputInfoPtr pInfo)
             break;
     }
 
+#ifdef AINPUT_READ_BUDGET_DEBUG
+    ainput_debug_read_budget(pInfo, debug_reads, debug_events);
+#endif
     ainput_report_read_end(pInfo, len);
 }
 
@@ -589,6 +590,10 @@ static void ainput_read_relative_mouse(InputInfoPtr pInfo)
     int acc_x = priv->acc_x;
     int acc_y = priv->acc_y;
     ssize_t len = 0;
+#ifdef AINPUT_READ_BUDGET_DEBUG
+    unsigned int debug_reads = 0;
+    size_t debug_events = 0;
+#endif
 
     for (unsigned int batch = 0; batch < priv->read_budget; batch++)
     {
@@ -598,6 +603,10 @@ static void ainput_read_relative_mouse(InputInfoPtr pInfo)
 
         priv->last_read_error = 0;
         size_t count = (size_t)len / sizeof(events[0]);
+#ifdef AINPUT_READ_BUDGET_DEBUG
+        debug_reads++;
+        debug_events += count;
+#endif
 
         for (size_t i = 0; i < count; i++)
         {
@@ -698,6 +707,9 @@ static void ainput_read_relative_mouse(InputInfoPtr pInfo)
 
     priv->acc_x = acc_x;
     priv->acc_y = acc_y;
+#ifdef AINPUT_READ_BUDGET_DEBUG
+    ainput_debug_read_budget(pInfo, debug_reads, debug_events);
+#endif
     ainput_report_read_end(pInfo, len);
 }
 
@@ -708,6 +720,10 @@ static void ainput_read_absolute_mouse(InputInfoPtr pInfo)
     ValuatorMask *motion_mask = priv->motion_mask;
     struct input_event events[AINPUT_EVENT_BATCH];
     ssize_t len = 0;
+#ifdef AINPUT_READ_BUDGET_DEBUG
+    unsigned int debug_reads = 0;
+    size_t debug_events = 0;
+#endif
 
     for (unsigned int batch = 0; batch < priv->read_budget; batch++)
     {
@@ -717,6 +733,10 @@ static void ainput_read_absolute_mouse(InputInfoPtr pInfo)
 
         priv->last_read_error = 0;
         size_t count = (size_t)len / sizeof(events[0]);
+#ifdef AINPUT_READ_BUDGET_DEBUG
+        debug_reads++;
+        debug_events += count;
+#endif
 
         for (size_t i = 0; i < count; i++)
         {
@@ -869,6 +889,9 @@ static void ainput_read_absolute_mouse(InputInfoPtr pInfo)
             break;
     }
 
+#ifdef AINPUT_READ_BUDGET_DEBUG
+    ainput_debug_read_budget(pInfo, debug_reads, debug_events);
+#endif
     ainput_report_read_end(pInfo, len);
 }
 
@@ -976,9 +999,6 @@ static int ainput_control(DeviceIntPtr dev, int what)
         {
             priv->fd = pInfo->fd;
             priv->last_read_error = 0;
-#ifdef AINPUT_XSERVER_DIRECT
-            ainput_configure_event_clock(pInfo, priv);
-#endif
             xf86AddEnabledDevice(pInfo);
         }
         dev->public.on = TRUE;
@@ -989,9 +1009,6 @@ static int ainput_control(DeviceIntPtr dev, int what)
             xf86RemoveEnabledDevice(pInfo);
         if (ainput_fd_is_server_managed(pInfo))
             priv->fd = -1;
-#ifdef AINPUT_XSERVER_DIRECT
-        priv->kernel_clock_monotonic = 0;
-#endif
         dev->public.on = FALSE;
         return Success;
 
