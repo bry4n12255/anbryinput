@@ -1,0 +1,337 @@
+diff --git a/dix/getevents.c b/dix/getevents.c
+index 56dc269..74987ec 100644
+--- a/dix/getevents.c
++++ b/dix/getevents.c
+@@ -1271,6 +1271,52 @@ QueuePointerEvents(DeviceIntPtr device, int type,
+     queueEventList(device, InputEventList, nevents);
+ }
+
++void
++QueueAInputKey(DeviceIntPtr device, int keycode, int is_down)
++{
++    InternalEvent *raw_slot;
++    InternalEvent *event_slot;
++    RawDeviceEvent *raw;
++    DeviceEvent *event;
++    DeviceIntPtr master;
++    int type = is_down ? KeyPress : KeyRelease;
++    CARD32 ms = GetTimeInMillis();
++
++    if (!device || !device->enabled || !device->key || !device->focus ||
++        !device->kbdfeed || keycode < 8 || keycode > 255)
++        return;
++
++    if (is_down && key_is_down(device, keycode, KEY_POSTED)) {
++        QueueKeyboardEvents(device, type, keycode);
++        return;
++    }
++
++    master = GetMaster(device, MASTER_KEYBOARD);
++    if (master && master->last.slave != device) {
++        QueueKeyboardEvents(device, type, keycode);
++        return;
++    }
++
++    if (!mieqReserveAInputPair(&raw_slot, &event_slot)) {
++        QueueKeyboardEvents(device, type, keycode);
++        return;
++    }
++
++    raw = &raw_slot->raw_event;
++    event = &event_slot->device_event;
++    init_raw(device, raw, ms, type, keycode);
++    init_device_event(event, device, ms, EVENT_SOURCE_NORMAL);
++    event->type = is_down ? ET_KeyPress : ET_KeyRelease;
++    event->detail.key = keycode;
++
++    if (is_down)
++        set_key_down(device, keycode, KEY_POSTED);
++    else
++        set_key_up(device, keycode, KEY_POSTED);
++
++    mieqCommitAInputPair(device, 0);
++}
++
+ /**
+  * Helper function for GetPointerEvents, which only generates motion and
+  * raw motion events for the slave device: does not update the master device.
+@@ -1318,9 +1364,9 @@ QueuePointerEvents(DeviceIntPtr device, int type,
+  * @return the number of events written into events.
+  */
+ static int
+-fill_pointer_events(InternalEvent *events, DeviceIntPtr pDev, int type,
+-                    int buttons, CARD32 ms, int flags,
+-                    const ValuatorMask *mask_in)
++fill_pointer_events_mutable(InternalEvent *events, DeviceIntPtr pDev, int type,
++                            int buttons, CARD32 ms, int flags,
++                            ValuatorMask *mask)
+ {
+     int num_events = 0;
+     DeviceEvent *event;
+@@ -1328,7 +1374,6 @@ fill_pointer_events(InternalEvent *events, DeviceIntPtr pDev, int type,
+     double screenx = 0.0, screeny = 0.0;        /* desktop coordinate system */
+     double devx = 0.0, devy = 0.0;      /* desktop-wide in device coords */
+     int sx = 0, sy = 0;                 /* for POINTER_SCREEN */
+-    ValuatorMask mask;
+     ScreenPtr scr;
+     int num_barrier_events = 0;
+
+@@ -1339,14 +1384,14 @@ fill_pointer_events(InternalEvent *events, DeviceIntPtr pDev, int type,
+                    pDev->id);
+             return 0;
+         }
+-        if (!mask_in || valuator_mask_num_valuators(mask_in) <= 0)
++        if (valuator_mask_num_valuators(mask) <= 0)
+             return 0;
+         break;
+     case ButtonPress:
+     case ButtonRelease:
+         if (!pDev->button || !buttons)
+             return 0;
+-        if (mask_in && valuator_mask_size(mask_in) > 0 && !pDev->valuator) {
++        if (valuator_mask_size(mask) > 0 && !pDev->valuator) {
+             ErrorF
+                 ("[dix] button event with valuator from device %d without valuators\n",
+                  pDev->id);
+@@ -1357,8 +1402,6 @@ fill_pointer_events(InternalEvent *events, DeviceIntPtr pDev, int type,
+         return 0;
+     }
+
+-    valuator_mask_copy(&mask, mask_in);
+-
+     if ((flags & POINTER_NORAW) == 0) {
+         raw = &events->raw_event;
+         events++;
+@@ -1369,38 +1412,38 @@ fill_pointer_events(InternalEvent *events, DeviceIntPtr pDev, int type,
+         if (flags & POINTER_EMULATED)
+             raw->flags = XIPointerEmulated;
+
+-        set_raw_valuators(raw, &mask, TRUE, raw->valuators.data_raw);
++        set_raw_valuators(raw, mask, TRUE, raw->valuators.data_raw);
+     }
+
+-    valuator_mask_drop_unaccelerated(&mask);
++    valuator_mask_drop_unaccelerated(mask);
+
+     /* valuators are in driver-native format (rel or abs) */
+
+     if (flags & POINTER_ABSOLUTE) {
+         if (flags & (POINTER_SCREEN | POINTER_DESKTOP)) {    /* valuators are in screen/desktop coords */
+-            sx = valuator_mask_get(&mask, 0);
+-            sy = valuator_mask_get(&mask, 1);
+-            scale_from_screen(pDev, &mask, flags);
++            sx = valuator_mask_get(mask, 0);
++            sy = valuator_mask_get(mask, 1);
++            scale_from_screen(pDev, mask, flags);
+         }
+
+-        transformAbsolute(pDev, &mask);
+-        clipAbsolute(pDev, &mask);
++        transformAbsolute(pDev, mask);
++        clipAbsolute(pDev, mask);
+         if ((flags & POINTER_NORAW) == 0 && raw)
+-            set_raw_valuators(raw, &mask, FALSE, raw->valuators.data);
++            set_raw_valuators(raw, mask, FALSE, raw->valuators.data);
+     }
+     else {
+-        transformRelative(pDev, &mask);
++        transformRelative(pDev, mask);
+
+         if (flags & POINTER_ACCELERATE)
+-            accelPointer(pDev, &mask, ms);
++            accelPointer(pDev, mask, ms);
+         if ((flags & POINTER_NORAW) == 0 && raw)
+-            set_raw_valuators(raw, &mask, FALSE, raw->valuators.data);
++            set_raw_valuators(raw, mask, FALSE, raw->valuators.data);
+
+-        moveRelative(pDev, flags, &mask);
++        moveRelative(pDev, flags, mask);
+     }
+
+     /* valuators are in device coordinate system in absolute coordinates */
+-    scale_to_desktop(pDev, &mask, &devx, &devy, &screenx, &screeny);
++    scale_to_desktop(pDev, mask, &devx, &devy, &screenx, &screeny);
+
+     /* #53037 XWarpPointer's scaling back and forth between screen and
+        device may leave us with rounding errors. End result is that the
+@@ -1415,7 +1458,7 @@ fill_pointer_events(InternalEvent *events, DeviceIntPtr pDev, int type,
+     }
+
+     scr = positionSprite(pDev, (flags & POINTER_ABSOLUTE) ? Absolute : Relative,
+-                         &mask, &devx, &devy, &screenx, &screeny,
++                         mask, &devx, &devy, &screenx, &screeny,
+                          &num_barrier_events, events);
+     num_events += num_barrier_events;
+     events += num_barrier_events;
+@@ -1423,11 +1466,11 @@ fill_pointer_events(InternalEvent *events, DeviceIntPtr pDev, int type,
+     /* screenx, screeny are in desktop coordinates,
+        mask is in device coordinates per-screen (the event data)
+        devx/devy is in device coordinate desktop-wide */
+-    updateHistory(pDev, &mask, ms);
++    updateHistory(pDev, mask, ms);
+
+-    clipValuators(pDev, &mask);
++    clipValuators(pDev, mask);
+
+-    storeLastValuators(pDev, &mask, devx, devy);
++    storeLastValuators(pDev, mask, devx, devy);
+
+     /* Update the MD's coordinates, which are always in desktop space. */
+     if (!InputDevIsMaster(pDev) && !InputDevIsFloating(pDev)) {
+@@ -1465,12 +1508,24 @@ fill_pointer_events(InternalEvent *events, DeviceIntPtr pDev, int type,
+         if (flags & POINTER_EMULATED)
+             event->flags = XIPointerEmulated;
+
+-        set_valuators(pDev, event, &mask);
++        set_valuators(pDev, event, mask);
+     }
+
+     return num_events;
+ }
+
++static int
++fill_pointer_events(InternalEvent *events, DeviceIntPtr pDev, int type,
++                    int buttons, CARD32 ms, int flags,
++                    const ValuatorMask *mask_in)
++{
++    ValuatorMask mask;
++
++    valuator_mask_copy(&mask, mask_in);
++    return fill_pointer_events_mutable(events, pDev, type, buttons, ms, flags,
++                                       &mask);
++}
++
+ /**
+  * Generate events for each scroll axis that changed between before/after
+  * for the device.
+@@ -1759,6 +1814,30 @@ GetPointerEvents(InternalEvent *events, DeviceIntPtr pDev, int type,
+     return num_events;
+ }
+
++void
++QueueAInputRelativeMotion2DRaw(DeviceIntPtr device, double dx, double dy,
++                               double raw_dx, double raw_dy)
++{
++    InternalEvent *events = InputEventList;
++    InternalEvent *out;
++    ValuatorMask mask;
++    int num_events = 0;
++    CARD32 ms = GetTimeInMillis();
++
++    if (!device || !device->enabled || !device->valuator ||
++        device->valuator->numAxes < 2 || !miPointerGetScreen(device))
++        return;
++
++    out = UpdateFromMaster(events, device, DEVCHANGE_POINTER_EVENT,
++                           &num_events);
++    valuator_mask_zero(&mask);
++    valuator_mask_set_unaccelerated(&mask, 0, dx, raw_dx);
++    valuator_mask_set_unaccelerated(&mask, 1, dy, raw_dy);
++    num_events += fill_pointer_events_mutable(out, device, MotionNotify, 0, ms,
++                                              POINTER_RELATIVE, &mask);
++    queueEventList(device, events, num_events);
++}
++
+ /**
+  * Generate internal events representing this proximity event and enqueue
+  * them on the event queue.
+diff --git a/include/input.h b/include/input.h
+index de89ee3..a4b62a8 100644
+--- a/include/input.h
++++ b/include/input.h
+@@ -437,6 +437,13 @@ extern _X_EXPORT void QueuePointerEvents(DeviceIntPtr pDev,
+                                          int buttons,
+                                          int flags, const ValuatorMask *mask);
+
++extern _X_EXPORT void QueueAInputKey(DeviceIntPtr pDev,
++                                     int keycode, int is_down);
++extern _X_EXPORT void QueueAInputRelativeMotion2DRaw(DeviceIntPtr pDev,
++                                                     double dx, double dy,
++                                                     double raw_dx,
++                                                     double raw_dy);
++
+ extern _X_EXPORT int GetKeyboardEvents(InternalEvent *events,
+                                        DeviceIntPtr pDev,
+                                        int type,
+diff --git a/mi/mi_priv.h b/mi/mi_priv.h
+index ba52f03..2223a7c 100644
+--- a/mi/mi_priv.h
++++ b/mi/mi_priv.h
+@@ -39,6 +39,8 @@ void miStepDash(int dist, int * pDashIndex, unsigned char * pDash,
+ Bool mieqInit(void);
+ void mieqFini(void);
+ void mieqEnqueue(DeviceIntPtr pDev, InternalEvent *e);
++Bool mieqReserveAInputPair(InternalEvent **first, InternalEvent **second);
++void mieqCommitAInputPair(DeviceIntPtr pDev, int last_motion);
+ void mieqSwitchScreen(DeviceIntPtr pDev, ScreenPtr pScreen, Bool set_dequeue_screen);
+ void mieqProcessDeviceEvent(DeviceIntPtr dev, InternalEvent *event, ScreenPtr screen);
+ void mieqProcessInputEvents(void);
+diff --git a/mi/mieq.c b/mi/mieq.c
+index 269156f..4fe4b8e 100644
+--- a/mi/mieq.c
++++ b/mi/mieq.c
+@@ -272,6 +272,64 @@ mieqEnqueue(DeviceIntPtr pDev, InternalEvent *e)
+     miEventQueue.tail = (oldtail + 1) % miEventQueue.nevents;
+ }
+
++Bool
++mieqReserveAInputPair(InternalEvent **first, InternalEvent **second)
++{
++    unsigned int first_tail = miEventQueue.tail;
++    unsigned int second_tail = first_tail + 1;
++    unsigned int new_tail;
++
++    if (second_tail == miEventQueue.nevents)
++        second_tail = 0;
++    new_tail = second_tail + 1;
++    if (new_tail == miEventQueue.nevents)
++        new_tail = 0;
++
++    if (second_tail == miEventQueue.head || new_tail == miEventQueue.head) {
++        if (!mieqGrowQueue(&miEventQueue, miEventQueue.nevents << 1)) {
++            miEventQueue.dropped++;
++            return FALSE;
++        }
++        first_tail = miEventQueue.tail;
++        second_tail = first_tail + 1;
++    }
++
++    *first = miEventQueue.events[first_tail].events;
++    *second = miEventQueue.events[second_tail].events;
++    return TRUE;
++}
++
++void
++mieqCommitAInputPair(DeviceIntPtr pDev, int last_motion)
++{
++    ScreenPtr screen = EnqueueScreen(pDev);
++    unsigned int first_tail = miEventQueue.tail;
++    unsigned int second_tail = first_tail + 1;
++    InternalEvent *first;
++    InternalEvent *second;
++    Time time;
++
++    if (second_tail == miEventQueue.nevents)
++        second_tail = 0;
++    first = miEventQueue.events[first_tail].events;
++    second = miEventQueue.events[second_tail].events;
++    time = first->any.time;
++    if (time < miEventQueue.lastEventTime &&
++        miEventQueue.lastEventTime - time < 10000)
++        time = miEventQueue.lastEventTime;
++    first->any.time = time;
++    second->any.time = time;
++    miEventQueue.events[first_tail].pScreen = screen;
++    miEventQueue.events[first_tail].pDev = pDev;
++    miEventQueue.events[second_tail].pScreen = screen;
++    miEventQueue.events[second_tail].pDev = pDev;
++    miEventQueue.lastEventTime = time;
++    miEventQueue.lastMotion = last_motion;
++    miEventQueue.tail = second_tail + 1;
++    if (miEventQueue.tail == miEventQueue.nevents)
++        miEventQueue.tail = 0;
++}
++
+ /**
+  * Changes the screen reference events are being enqueued from.
+  * Input events are enqueued with a screen reference and dequeued and

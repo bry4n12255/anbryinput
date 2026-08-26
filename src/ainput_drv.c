@@ -63,8 +63,8 @@ extern void QueueAInputRelativeMotion2DRaw(DeviceIntPtr pDev,
 #define DRIVER_NAME "ainput"
 #define DRIVER_VERSION 1
 #define AINPUT_VERSION_MAJOR 1
-#define AINPUT_VERSION_MINOR 7
-#define AINPUT_VERSION_PATCH 2
+#define AINPUT_VERSION_MINOR 8
+#define AINPUT_VERSION_PATCH 0
 
 #define PROP_SENSITIVITY "AInput Sensitivity"
 #define AINPUT_EVENT_BATCH 256
@@ -142,24 +142,11 @@ static void ainput_apply_sensitivity(AInputPriv *priv, float new_sens)
     ainput_update_effective_sensitivity(priv);
 }
 
-static inline void ainput_post_relative_motion(AInputPriv *priv,
-                                               DeviceIntPtr dev,
+static inline void ainput_post_relative_motion(DeviceIntPtr dev,
                                                ValuatorMask *mask,
                                                double dx, double dy,
-                                               double raw_dx, double raw_dy,
-                                               const struct input_event *ev)
+                                               double raw_dx, double raw_dy)
 {
-#ifdef AINPUT_XSERVER_DIRECT
-    if (!priv->is_absolute)
-    {
-        QueueAInputRelativeMotion2DRaw(dev, dx, dy, raw_dx, raw_dy);
-        return;
-    }
-#endif
-
-    (void)priv;
-    (void)ev;
-
     valuator_mask_zero(mask);
     valuator_mask_set_unaccelerated(mask, 0, dx, raw_dx);
     valuator_mask_set_unaccelerated(mask, 1, dy, raw_dy);
@@ -536,16 +523,15 @@ static void ainput_read_keyboard(InputInfoPtr pInfo)
             break;
 
         priv->last_read_error = 0;
-        size_t count = (size_t)len / sizeof(events[0]);
+        const struct input_event *ev = events;
+        const struct input_event *end =
+            (const struct input_event *)((const char *)events + len);
 #ifdef AINPUT_READ_BUDGET_DEBUG
         debug_reads++;
-        debug_events += count;
 #endif
 
-        for (size_t i = 0; i < count; i++)
+        for (; ev < end; ev++)
         {
-            const struct input_event *ev = &events[i];
-
             if (ev->type == EV_SYN && ev->code == SYN_DROPPED)
             {
                 ainput_begin_resync(priv);
@@ -570,6 +556,9 @@ static void ainput_read_keyboard(InputInfoPtr pInfo)
             }
         }
 
+#ifdef AINPUT_READ_BUDGET_DEBUG
+        debug_events += (size_t)(ev - events);
+#endif
         if ((size_t)len < sizeof(events))
             break;
     }
@@ -577,14 +566,17 @@ static void ainput_read_keyboard(InputInfoPtr pInfo)
 #ifdef AINPUT_READ_BUDGET_DEBUG
     ainput_debug_read_budget(pInfo, debug_reads, debug_events);
 #endif
-    ainput_report_read_end(pInfo, len);
+    if (len <= 0)
+        ainput_report_read_end(pInfo, len);
 }
 
 static void ainput_read_relative_mouse(InputInfoPtr pInfo)
 {
     AInputPriv *priv = pInfo->private;
     DeviceIntPtr dev = pInfo->dev;
+#ifndef AINPUT_XSERVER_DIRECT
     ValuatorMask *motion_mask = priv->motion_mask;
+#endif
     struct input_event events[AINPUT_EVENT_BATCH];
     double sens = priv->effective_sensitivity;
     int acc_x = priv->acc_x;
@@ -602,16 +594,15 @@ static void ainput_read_relative_mouse(InputInfoPtr pInfo)
             break;
 
         priv->last_read_error = 0;
-        size_t count = (size_t)len / sizeof(events[0]);
+        const struct input_event *ev = events;
+        const struct input_event *end =
+            (const struct input_event *)((const char *)events + len);
 #ifdef AINPUT_READ_BUDGET_DEBUG
         debug_reads++;
-        debug_events += count;
 #endif
 
-        for (size_t i = 0; i < count; i++)
+        for (; ev < end; ev++)
         {
-            const struct input_event *ev = &events[i];
-
             if (ev->type == EV_SYN && ev->code == SYN_DROPPED)
             {
                 acc_x = 0;
@@ -688,12 +679,19 @@ static void ainput_read_relative_mouse(InputInfoPtr pInfo)
 
                 if (acc_x != 0 || acc_y != 0)
                 {
-                    ainput_post_relative_motion(priv, dev, motion_mask,
+#ifdef AINPUT_XSERVER_DIRECT
+                    QueueAInputRelativeMotion2DRaw(dev,
+                                                  (double)acc_x * sens,
+                                                  (double)acc_y * sens,
+                                                  (double)acc_x,
+                                                  (double)acc_y);
+#else
+                    ainput_post_relative_motion(dev, motion_mask,
                                                 (double)acc_x * sens,
                                                 (double)acc_y * sens,
                                                 (double)acc_x,
-                                                (double)acc_y,
-                                                ev);
+                                                (double)acc_y);
+#endif
                     acc_x = 0;
                     acc_y = 0;
                 }
@@ -701,6 +699,9 @@ static void ainput_read_relative_mouse(InputInfoPtr pInfo)
             }
         }
 
+#ifdef AINPUT_READ_BUDGET_DEBUG
+        debug_events += (size_t)(ev - events);
+#endif
         if ((size_t)len < sizeof(events))
             break;
     }
@@ -710,7 +711,8 @@ static void ainput_read_relative_mouse(InputInfoPtr pInfo)
 #ifdef AINPUT_READ_BUDGET_DEBUG
     ainput_debug_read_budget(pInfo, debug_reads, debug_events);
 #endif
-    ainput_report_read_end(pInfo, len);
+    if (len <= 0)
+        ainput_report_read_end(pInfo, len);
 }
 
 static void ainput_read_absolute_mouse(InputInfoPtr pInfo)
@@ -732,16 +734,15 @@ static void ainput_read_absolute_mouse(InputInfoPtr pInfo)
             break;
 
         priv->last_read_error = 0;
-        size_t count = (size_t)len / sizeof(events[0]);
+        const struct input_event *ev = events;
+        const struct input_event *end =
+            (const struct input_event *)((const char *)events + len);
 #ifdef AINPUT_READ_BUDGET_DEBUG
         debug_reads++;
-        debug_events += count;
 #endif
 
-        for (size_t i = 0; i < count; i++)
+        for (; ev < end; ev++)
         {
-            const struct input_event *ev = &events[i];
-
             if (ev->type == EV_SYN && ev->code == SYN_DROPPED)
             {
                 ainput_begin_resync(priv);
@@ -838,10 +839,9 @@ static void ainput_read_absolute_mouse(InputInfoPtr pInfo)
                     double dx = (double)priv->acc_x * sens;
                     double dy = (double)priv->acc_y * sens;
 
-                    ainput_post_relative_motion(priv, dev, motion_mask, dx, dy,
+                    ainput_post_relative_motion(dev, motion_mask, dx, dy,
                                                 (double)priv->acc_x,
-                                                (double)priv->acc_y,
-                                                ev);
+                                                (double)priv->acc_y);
 
                     priv->acc_x = 0;
                     priv->acc_y = 0;
@@ -873,11 +873,10 @@ static void ainput_read_absolute_mouse(InputInfoPtr pInfo)
                     double step_x = (double)delta_x * sens;
                     double step_y = (double)delta_y * sens;
 
-                    ainput_post_relative_motion(priv, dev, motion_mask,
+                    ainput_post_relative_motion(dev, motion_mask,
                                                 step_x, step_y,
                                                 (double)delta_x,
-                                                (double)delta_y,
-                                                ev);
+                                                (double)delta_y);
 
                     priv->has_abs_event = 0;
                 }
@@ -885,6 +884,9 @@ static void ainput_read_absolute_mouse(InputInfoPtr pInfo)
             }
         }
 
+#ifdef AINPUT_READ_BUDGET_DEBUG
+        debug_events += (size_t)(ev - events);
+#endif
         if ((size_t)len < sizeof(events))
             break;
     }
@@ -892,7 +894,8 @@ static void ainput_read_absolute_mouse(InputInfoPtr pInfo)
 #ifdef AINPUT_READ_BUDGET_DEBUG
     ainput_debug_read_budget(pInfo, debug_reads, debug_events);
 #endif
-    ainput_report_read_end(pInfo, len);
+    if (len <= 0)
+        ainput_report_read_end(pInfo, len);
 }
 
 static int ainput_device_init(DeviceIntPtr dev)

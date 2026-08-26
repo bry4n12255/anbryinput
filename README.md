@@ -161,6 +161,21 @@ The experimental patch files are:
 - `patches/xlibre-ainput-direct-experimental.patch` provides `QueueAInputRelativeMotion2DRaw` and `QueueAInputKey`
 - `patches/xorg-ainput-direct-experimental.patch` provides `QueueAInputRelativeMotion2DRaw` and `QueueAInputKey`
 
+Two additional optimized variants are temporarily available:
+
+- `patches/xlibre-ainput-direct-optimized-experimental.patch`
+- `patches/xorg-ainput-direct-optimized-experimental.patch`
+
+These are complete alternatives to the corresponding direct patches, not
+patches to apply on top of them. Apply only one patch to a clean X server
+source tree. The optimized variants preserve the same event path while
+avoiding a redundant `ValuatorMask` copy for AnbryInput relative motion.
+
+The optimized variants will remain separate while their stability is compared
+with the standard direct patches. If they prove equally stable, their changes
+will be moved into the standard direct patches and the temporary variants will
+be removed.
+
 Each patch is focused on the latest stable release of its respective X server.
 
 Buttons use the normal Xorg/XLibre path.
@@ -181,9 +196,12 @@ Both helpers use the X server's current event time, matching the normal input
 path. Kernel timestamps are not mixed with server-timestamped buttons and
 scroll events.
 
-The patch is additive: it does not rewrite the server's generic event or
-pointer paths. Its entry points run only when an AnbryInput module built with
-`XSERVER_DIRECT=1` calls them; every other driver keeps the original behavior.
+The standard direct patch is additive and does not rewrite the server's generic
+event or pointer paths. The optimized variant refactors
+`fill_pointer_events()` into a shared mutable core, while retaining the
+original copying wrapper for generic callers. Its specialized entry points run
+only when an AnbryInput module built with `XSERVER_DIRECT=1` calls them; every
+other driver keeps the original behavior.
 
 The earlier hand-written pointer-positioning and button helpers were removed
 after real-world testing exposed incorrect focus, multi-screen boundary, and
