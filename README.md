@@ -309,10 +309,11 @@ Section "InputClass"
     Option "ReferenceDPI" "1000"
 
     # Optional low-latency backend. The traditional read backend is default.
-    # Option "Backend" "io_uring"
+    # Option "Backend" "io_uring" # Remove the above read backend.
     # Option "ReadMultishot" "on"
     # Option "SQPoll" "on"
     # Option "SQPollIdle" "50"
+    # Option "IoUringDebug" "off"
 EndSection
 ```
 
@@ -328,6 +329,11 @@ Section "InputClass"
     Option "Backend" "read"
     Option "Type" "keyboard"
     Option "xkb_layout" "us"
+
+    # Option "Backend" "io_uring" # Remove the above read backend.
+    # Option "ReadMultishot" "off"
+    # Option "SQPoll" "off"
+    # Option "SQPollIdle" "50"
 EndSection
 ```
 
@@ -365,6 +371,22 @@ watch registration, cancellation state, and a teardown summary. Bounded
 sampling keeps high-polling-rate devices from filling the log. Error and
 invariant messages that identify malformed CQEs remain visible even when the
 debug option is off.
+
+### SQPOLL
+
+SQPOLL is recommended on systems with at least 6 physical cores and 12
+hardware threads. A 4-core/8-thread system may still benefit, but game
+frametimes and CPU utilization should be measured before enabling it.
+
+For consistent results, keep at least one physical core available for the
+SQPOLL kernel thread. When using `SQPollCPU`, avoid a logical CPU whose SMT
+sibling runs a latency-sensitive game, compositor, audio, or X server thread.
+
+SQPOLL is not recommended on systems with 4 hardware threads or fewer. During
+continuous input, its kernel thread can consume most of one logical CPU.
+`SQPollIdle` controls how long that thread polls before sleeping after activity;
+a longer value improves wakeup consistency at the cost of additional CPU and
+power usage.
 
 ## Read Budget
 
@@ -504,7 +526,7 @@ so its two partial intervals can be negative or quantized by several
 milliseconds; their sum remains the precise end-to-end `latency_ms` value.
 
 The dashboards read the timestamp CSV produced by the current benchmark. Open
-[`tools/latency_samples/.latency_dashboard.html`](tools/latency_samples/.latency_dashboard.html)
+[`tools/latency_samples/latency_dashboard.html`](tools/latency_samples/latency_dashboard.html)
 for the distribution and spike views, or
 [`tools/latency_samples/latency_timestamp_dashboard.html`](tools/latency_samples/latency_timestamp_dashboard.html)
 for the approximate evdev-to-Xorg and Xorg-to-client split. Select or drop a
