@@ -259,6 +259,12 @@ or
 sudo make NATIVE=1 AGGRESSIVE=1 XSERVER_DIRECT=1 install
 ```
 
+or
+
+```sh
+sudo make NATIVE=1 AGGRESSIVE=1 XSERVER_DIRECT=1 IO_URING=1 install
+```
+
 Restart Xorg/XLibre after installing. Input drivers are loaded into the server
 process and are not reloaded just because the `.so` file changed on disk.
 
