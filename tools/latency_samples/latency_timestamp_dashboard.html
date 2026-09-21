@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Latency Scope — timestamp diagnostics</title>
+<style>
+:root { color-scheme: dark; --bg:#101318; --panel:#181d25; --line:#2c3440; --text:#e8edf5; --muted:#99a6b7; --evdev:#5ec8e5; --server:#edaa62; --total:#8edc8e; --alert:#ef7171; }
+* { box-sizing:border-box } body { margin:0; background:var(--bg); color:var(--text); font:14px system-ui,sans-serif } main { max-width:1200px; margin:auto; padding:28px 20px 50px } h1 { margin:0 0 4px; font-size:24px } p { color:var(--muted); line-height:1.5 } .panel { background:var(--panel); border:1px solid var(--line); border-radius:10px; margin-top:18px; padding:18px } .drop { border:1px dashed #566579; border-radius:8px; color:var(--muted); cursor:pointer; padding:25px; text-align:center } .drop.drag { border-color:var(--evdev); color:var(--text) } input { display:none } #status { min-height:22px } #stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(145px,1fr)); gap:10px } .stat { border:1px solid var(--line); border-radius:7px; padding:10px } .stat small { color:var(--muted); display:block } .stat b { display:block; font-size:18px; margin-top:4px } svg { background:#121720; border-radius:7px; display:block; height:360px; width:100% } .legend { display:flex; flex-wrap:wrap; gap:16px; color:var(--muted); margin:0 0 10px } .legend i { border-radius:50%; display:inline-block; height:9px; margin-right:5px; width:9px } .note { font-size:12px } table { border-collapse:collapse; width:100% } th,td { border-bottom:1px solid var(--line); padding:7px; text-align:right } th:first-child,td:first-child { text-align:left } .bad { color:var(--alert) }
+</style>
+<main>
+  <h1>LATENCY SCOPE · TIMESTAMP DIAGNOSTICS</h1>
+  <p>Approximately separates the delay before Xorg publishes an event from the delay between Xorg and the client.</p>
+  <section class="panel"><div id="drop" class="drop">Drop a CSV here or click to select one<input id="file" type="file" accept=".csv,text/csv"></div><p id="status"></p></section>
+  <section class="panel"><div id="stats"></div></section>
+  <section class="panel"><div class="legend"><span><i style="background:var(--evdev)"></i>evdev → Xorg</span><span><i style="background:var(--server)"></i>Xorg → client</span><span><i style="background:var(--total)"></i>end-to-end</span></div><svg id="plot" viewBox="0 0 1100 360" preserveAspectRatio="none"></svg><p class="note">Xorg uses a coarse clock, so both segments may fluctuate or even become negative by a few milliseconds. The end-to-end line remains precise, and the split is most useful for long spikes.</p></section>
+  <section class="panel"><h2>Largest spikes</h2><table><thead><tr><th>sample</th><th>end-to-end</th><th>evdev → Xorg</th><th>Xorg → client</th></tr></thead><tbody id="peaks"></tbody></table></section>
+</main>
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const COLORS = { pre: "#5ec8e5", post: "#edaa62", total: "#8edc8e" };
+  let rows = [];
+
+  function percentile(values, p) {
+    const sorted = [...values].sort((a,b) => a-b);
+    return sorted[Math.min(sorted.length - 1, Math.floor((sorted.length - 1) * p))];
+  }
+  function fmt(value) { return `${value.toFixed(3)} ms`; }
+  function unwrapServerTime(server32, received) {
+    const cycle = 2 ** 32;
+    let value = Math.floor(received / cycle) * cycle + server32;
+    if (value - received > cycle / 2) value -= cycle;
+    if (received - value > cycle / 2) value += cycle;
+    return value;
+  }
+  function parse(text) {
+    const lines = text.replace(/^\uFEFF/, "").split(/\r?\n/).filter(line => line.trim());
+    if (lines.length < 2) throw new Error("Empty CSV");
+    const header = lines[0].split(",").map(value => value.trim().toLowerCase().replace(/^"|"$/g, ""));
+    if (!header.includes("latency_ms")) throw new Error("Missing latency_ms column");
+    const at = name => header.indexOf(name);
+    const index = at("index"), latency = at("latency_ms"), evdev = at("evdev_monotonic_ms"), server = at("xserver_time_ms"), received = at("received_monotonic_ms");
+    const hasStages = evdev >= 0 && server >= 0 && received >= 0;
+    return lines.slice(1).map((line, fallback) => {
+      const value = line.split(",").map(part => part.trim());
+      const total = Number(value[latency]);
+      if (!Number.isFinite(total)) return null;
+      const row = { i: Number.isFinite(Number(value[index])) ? Number(value[index]) : fallback, total, pre: null, post: null };
+      if (hasStages) {
+        const hardware = Number(value[evdev]), client = Number(value[received]), server32 = Number(value[server]);
+        if (![hardware, client, server32].every(Number.isFinite)) return null;
+        const published = unwrapServerTime(server32, client);
+        row.pre = published - hardware;
+        row.post = client - published;
+      }
+      return row;
+    }).filter(Boolean);
+  }
+  function svg(tag, attributes) { const node = document.createElementNS("http://www.w3.org/2000/svg", tag); Object.entries(attributes).forEach(([key,value]) => node.setAttribute(key,value)); return node; }
+  function plot() {
+    const graph = $("plot"), W=1100,H=360,L=60,R=18,T=18,B=36;
+    graph.replaceChildren();
+    const hasStages = rows.some(row => Number.isFinite(row.pre) && Number.isFinite(row.post));
+    const all = rows.flatMap(row => hasStages ? [row.pre,row.post,row.total] : [row.total]);
+    const low = Math.min(0, percentile(all,.001)), high = Math.max(0.1, percentile(all,.999));
+    const min = low - (high-low)*.08, max = high + (high-low)*.08;
+    const x = position => L + position / Math.max(1, rows.length-1) * (W-L-R);
+    const y = value => T + (max-value) / (max-min) * (H-T-B);
+    for (let tick=0;tick<=5;tick++) { const value=min+(max-min)*tick/5, yy=y(value); graph.append(svg("line",{x1:L,x2:W-R,y1:yy,y2:yy,stroke:"#2c3440"})); const label=svg("text",{x:L-8,y:yy+4,"text-anchor":"end",fill:"#99a6b7","font-size":"11"}); label.textContent=value.toFixed(2); graph.append(label); }
+    graph.append(svg("line",{x1:L,x2:W-R,y1:y(0),y2:y(0),stroke:"#99a6b7","stroke-width":"1"}));
+    const series = hasStages ? [["pre",COLORS.pre],["post",COLORS.post],["total",COLORS.total]] : [["total",COLORS.total]];
+    series.forEach(([key,color]) => { let d=""; rows.forEach((row,pos) => d += `${pos ? "L" : "M"}${x(pos).toFixed(2)},${y(row[key]).toFixed(2)}`); graph.append(svg("path",{d,fill:"none",stroke:color,"stroke-width":key === "total" ? "1.4" : "1","stroke-linejoin":"round"})); });
+  }
+  function render() {
+    const hasStages = rows.some(row => Number.isFinite(row.pre) && Number.isFinite(row.post));
+    const columns = hasStages ? [["End-to-end","total"],["evdev → Xorg","pre"],["Xorg → client","post"]] : [["End-to-end","total"]];
+    $("stats").replaceChildren(...columns.flatMap(([label,key]) => { const values=rows.map(row=>row[key]); return [[label,"p50",percentile(values,.5)],[label,"p99",percentile(values,.99)]]; }).map(([label,pct,value]) => { const box=document.createElement("div"); box.className="stat"; box.innerHTML=`<small>${label} · ${pct}</small><b>${fmt(value)}</b>`; return box; }));
+    plot();
+    const peaks=[...rows].sort((a,b)=>b.total-a.total).slice(0,12);
+    $("peaks").innerHTML=peaks.map(row=>`<tr><td>#${row.i}</td><td>${fmt(row.total)}</td><td>${Number.isFinite(row.pre)?fmt(row.pre):"—"}</td><td>${Number.isFinite(row.post)?fmt(row.post):"—"}</td></tr>`).join("");
+  }
+  function load(file) { if (!file) return; const reader=new FileReader(); reader.onload=event => { try { rows=parse(String(event.target.result)); if (!rows.length) throw new Error("No valid samples"); $("status").textContent=`${file.name}: ${rows.length} samples loaded.`; render(); } catch (error) { $("status").innerHTML=`<span class="bad">${error.message}</span>`; } }; reader.onerror=()=>{$("status").innerHTML='<span class="bad">Failed to read the file</span>';}; reader.readAsText(file); }
+  const drop=$("drop"), input=$("file"); drop.addEventListener("click",()=>input.click()); input.addEventListener("change",event=>load(event.target.files[0])); ["dragenter","dragover"].forEach(type=>drop.addEventListener(type,event=>{event.preventDefault();drop.classList.add("drag")})); ["dragleave","drop"].forEach(type=>drop.addEventListener(type,event=>{event.preventDefault();drop.classList.remove("drag")})); drop.addEventListener("drop",event=>load(event.dataTransfer.files[0]));
+})();
+</script>

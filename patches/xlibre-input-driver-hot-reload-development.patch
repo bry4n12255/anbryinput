@@ -1,0 +1,539 @@
+diff --git a/hw/xfree86/common/xf86Config.c b/hw/xfree86/common/xf86Config.c
+index 0a2e3a7..376b683 100644
+--- a/hw/xfree86/common/xf86Config.c
++++ b/hw/xfree86/common/xf86Config.c
+@@ -131,6 +131,10 @@ static ModuleDefault ModuleDefaults[] = {
+     {.name = NULL,.toLoad = FALSE,.load_opt = NULL}
+ };
+ 
++static Bool config_paths_saved;
++static char *input_reload_config_file;
++static char *input_reload_config_dir;
++
+ /* Forward declarations */
+ static Bool configScreen(confScreenPtr screenp, XF86ConfScreenPtr conf_screen,
+                          int scrnum, MessageType from, Bool auto_gpu_device);
+@@ -2322,6 +2326,14 @@ xf86HandleConfigFile(Bool autoconfig)
+     Bool implicit_layout = FALSE;
+     XF86ConfLayoutPtr layout;
+ 
++    if (!config_paths_saved) {
++        input_reload_config_file =
++            xf86ConfigFile ? xstrdup(xf86ConfigFile) : NULL;
++        input_reload_config_dir =
++            xf86ConfigDir ? xstrdup(xf86ConfigDir) : NULL;
++        config_paths_saved = TRUE;
++    }
++
+     if (!autoconfig) {
+         char *filename, *dirname, *sysdirname;
+         const char *filesearch, *dirsearch;
+@@ -2480,6 +2492,63 @@ xf86HandleConfigFile(Bool autoconfig)
+     return CONFIG_OK;
+ }
+ 
++Bool
++xf86ReloadInputClasses(void)
++{
++    XF86ConfigPtr active = xf86configptr;
++    XF86ConfigPtr fresh;
++    XF86ConfInputClassPtr old_classes;
++    const char *filesearch;
++    const char *dirsearch;
++    char *filename;
++    char *dirname;
++    char *sysdirname;
++
++    if (!active)
++        return FALSE;
++
++    if (!PrivsElevated()) {
++        filesearch = ALL_CONFIGPATH;
++        dirsearch = ALL_CONFIGDIRPATH;
++    }
++    else {
++        filesearch = RESTRICTED_CONFIGPATH;
++        dirsearch = RESTRICTED_CONFIGDIRPATH;
++    }
++
++    xf86configptr = NULL;
++    xf86initConfigFiles();
++    sysdirname = xf86openConfigDirFiles(SYS_CONFIGDIRPATH, NULL, PROJECTROOT);
++    dirname = xf86openConfigDirFiles(dirsearch, input_reload_config_dir,
++                                     PROJECTROOT);
++    filename = xf86openConfigFile(filesearch, input_reload_config_file,
++                                  PROJECTROOT);
++
++    if (!filename && !dirname && !sysdirname) {
++        xf86closeConfigFile();
++        xf86configptr = active;
++        return FALSE;
++    }
++
++    free(filename);
++    free(dirname);
++    free(sysdirname);
++    fresh = xf86readConfigFile();
++    xf86closeConfigFile();
++    xf86configptr = active;
++    if (!fresh)
++        return FALSE;
++
++    old_classes = active->conf_inputclass_lst;
++    active->conf_inputclass_lst = fresh->conf_inputclass_lst;
++    fresh->conf_inputclass_lst = NULL;
++    xf86freeInputClassList(old_classes);
++    xf86freeConfig(fresh);
++
++    xf86Msg(X_INFO, "Reloaded InputClass configuration from disk\n");
++    return TRUE;
++}
++
+ Bool
+ xf86PathIsSafe(const char *path)
+ {
+diff --git a/hw/xfree86/common/xf86Config.h b/hw/xfree86/common/xf86Config.h
+index f467f55..12effd1 100644
+--- a/hw/xfree86/common/xf86Config.h
++++ b/hw/xfree86/common/xf86Config.h
+@@ -62,6 +62,7 @@ const char **xf86DriverlistFromConfig(void);
+ const char **xf86InputDriverlistFromConfig(void);
+ Bool xf86BuiltinInputDriver(const char *);
+ ConfigStatus xf86HandleConfigFile(Bool);
++Bool xf86ReloadInputClasses(void);
+ 
+ Bool xf86AutoConfig(void);
+ GDevPtr autoConfigDevice(GDevPtr preconf_device);
+diff --git a/hw/xfree86/common/xf86Events.c b/hw/xfree86/common/xf86Events.c
+index 0340ea2..d2e9e7e 100644
+--- a/hw/xfree86/common/xf86Events.c
++++ b/hw/xfree86/common/xf86Events.c
+@@ -238,6 +238,8 @@ xf86Wakeup(void *blockData, int err)
+         (dispatchException & DE_TERMINATE)){
+             xf86VTSwitch();
+     }
++
++    xf86InputHotReloadCheck();
+ }
+ 
+ /*
+diff --git a/hw/xfree86/common/xf86Helper.c b/hw/xfree86/common/xf86Helper.c
+index 382e601..004355c 100644
+--- a/hw/xfree86/common/xf86Helper.c
++++ b/hw/xfree86/common/xf86Helper.c
+@@ -130,6 +130,15 @@ xf86AddInputDriver(InputDriverPtr driver, void *module, int flags)
+     xf86InputDriverList[xf86NumInputDrivers - 1]->module = module;
+ }
+ 
++void
++xf86DeleteInputDriver(int drvIndex)
++{
++    if (xf86InputDriverList[drvIndex] && xf86InputDriverList[drvIndex]->module)
++        UnloadModule(xf86InputDriverList[drvIndex]->module);
++    free(xf86InputDriverList[drvIndex]);
++    xf86InputDriverList[drvIndex] = NULL;
++}
++
+ InputDriverPtr
+ xf86LookupInputDriver(const char *name)
+ {
+diff --git a/hw/xfree86/common/xf86InPriv.h b/hw/xfree86/common/xf86InPriv.h
+index 3a84a5d..6650a40 100644
+--- a/hw/xfree86/common/xf86InPriv.h
++++ b/hw/xfree86/common/xf86InPriv.h
+@@ -35,5 +35,6 @@
+ /* xf86Globals.c */
+ extern InputDriverPtr *xf86InputDriverList;
+ extern int xf86NumInputDrivers;
++void xf86DeleteInputDriver(int drvIndex);
+ 
+ #endif                          /* _xf86InPriv_h */
+diff --git a/hw/xfree86/common/xf86Init.c b/hw/xfree86/common/xf86Init.c
+index 33e2c4a..2937a60 100644
+--- a/hw/xfree86/common/xf86Init.c
++++ b/hw/xfree86/common/xf86Init.c
+@@ -732,6 +732,8 @@ InitInput(int argc, char **argv)
+ 
+     mieqInit();
+ 
++    xf86InputHotReloadInit();
++
+     /* Initialize all configured input devices */
+     for (pInfo = xf86ConfigLayout.inputs; pInfo && *pInfo; pInfo++) {
+         (*pInfo)->options =
+@@ -967,6 +969,11 @@ ddxProcessArgument(int argc, char **argv, int i)
+         xf86AllowMouseOpenFail = TRUE;
+         return 1;
+     }
++    if (!strcmp(argv[i], "-inputdevreload")) {
++        CHECK_FOR_REQUIRED_ARGUMENTS(1);
++        xf86InputHotReloadEnable(argv[i + 1]);
++        return 2;
++    }
+     if (!strcmp(argv[i], "-ignoreABI")) {
+         LoaderSetIgnoreAbi();
+         return 1;
+@@ -1211,6 +1218,7 @@ ddxUseMsg(void)
+     ErrorF("-verbose [n]           verbose startup messages\n");
+     ErrorF("-logverbose [n]        verbose log messages\n");
+     ErrorF("-quiet                 minimal startup messages\n");
++    ErrorF("-inputdevreload driver enable SIGUSR2 hot reload for an input driver\n");
+     ErrorF("-fbbpp n               set bpp for the framebuffer. Default: 8\n");
+     ErrorF("-depth n               set colour depth. Default: 8\n");
+     ErrorF
+diff --git a/hw/xfree86/common/xf86Xinput.c b/hw/xfree86/common/xf86Xinput.c
+index 766d1ae..07e49f7 100644
+--- a/hw/xfree86/common/xf86Xinput.c
++++ b/hw/xfree86/common/xf86Xinput.c
+@@ -66,7 +66,9 @@
+ #include "xf86_priv.h"
+ #include "xf86Priv.h"
+ #include "xf86Config.h"
++#include "xf86Opt.h"
+ #include "xf86Xinput_priv.h"
++#include "xf86InPriv.h"
+ #include "XIstubs.h"
+ #include "xf86Optrec.h"
+ #include "mipointer.h"
+@@ -84,6 +86,223 @@
+ #ifdef HAVE_FNMATCH_H
+ #include <fnmatch.h>
+ #endif
++#include <signal.h>
++
++typedef struct {
++    XF86OptionPtr options;
++    InputAttributes *attrs;
++    char *name;
++    DeviceIntPtr old_dev;
++    DeviceIntPtr master;
++    Bool enabled;
++} InputHotReloadDeviceRec;
++
++static char *input_hot_reload_driver;
++static volatile sig_atomic_t input_hot_reload_pending;
++static XF86OptionPtr xf86InputHotReloadBaseOptions(InputInfoPtr pInfo);
++
++static void
++xf86InputHotReloadSignal(int sig)
++{
++    (void) sig;
++    input_hot_reload_pending = 1;
++}
++
++void
++xf86InputHotReloadEnable(const char *driver)
++{
++#if defined(__linux__) && defined(SIGUSR2)
++    free(input_hot_reload_driver);
++    input_hot_reload_driver = xstrdup(driver);
++    if (!input_hot_reload_driver)
++        FatalError("Cannot allocate input hot reload driver name\n");
++#else
++    (void) driver;
++    FatalError("-inputdevreload is only supported on Linux with SIGUSR2\n");
++#endif
++}
++
++void
++xf86InputHotReloadInit(void)
++{
++#if defined(__linux__) && defined(SIGUSR2)
++    input_hot_reload_pending = 0;
++    if (input_hot_reload_driver) {
++        OsSignal(SIGUSR2, xf86InputHotReloadSignal);
++        xf86Msg(X_INFO,
++                "Input hot reload enabled for '%s'; send SIGUSR2 to reload\n",
++                input_hot_reload_driver);
++    }
++#endif
++}
++
++static void
++xf86InputHotReloadFreeSnapshots(InputHotReloadDeviceRec *devices, int count)
++{
++    int i;
++
++    if (!devices)
++        return;
++
++    for (i = 0; i < count; i++) {
++        xf86optionListFree(devices[i].options);
++        FreeInputAttributes(devices[i].attrs);
++        free(devices[i].name);
++    }
++    free(devices);
++}
++
++void
++xf86InputHotReloadCheck(void)
++{
++#if defined(__linux__) && defined(SIGUSR2)
++    InputHotReloadDeviceRec *devices = NULL;
++    InputDriverPtr driver;
++    InputInfoPtr pInfo;
++    int driver_index = -1;
++    int count = 0;
++    int i = 0;
++    int recreated = 0;
++
++    if (!input_hot_reload_driver || !input_hot_reload_pending)
++        return;
++
++    input_hot_reload_pending = 0;
++    driver = xf86LookupInputDriver(input_hot_reload_driver);
++    if (!driver) {
++        xf86Msg(X_ERROR, "Input hot reload: driver '%s' is not loaded\n",
++                input_hot_reload_driver);
++        return;
++    }
++
++    for (i = 0; i < xf86NumInputDrivers; i++) {
++        if (xf86InputDriverList[i] == driver) {
++            driver_index = i;
++            break;
++        }
++    }
++    if (driver_index < 0) {
++        xf86Msg(X_ERROR,
++                "Input hot reload: driver '%s' has no module-list entry\n",
++                input_hot_reload_driver);
++        return;
++    }
++
++    for (pInfo = xf86InputDevs; pInfo; pInfo = pInfo->next) {
++        if (pInfo->drv != driver)
++            continue;
++        if (!pInfo->dev) {
++            xf86Msg(X_ERROR,
++                    "Input hot reload: '%s' has no X device; reload aborted\n",
++                    pInfo->name);
++            return;
++        }
++        count++;
++    }
++
++    if (count) {
++        devices = calloc(count, sizeof(*devices));
++        if (!devices) {
++            xf86Msg(X_ERROR, "Input hot reload: snapshot allocation failed\n");
++            return;
++        }
++    }
++
++    i = 0;
++    for (pInfo = xf86InputDevs; pInfo; pInfo = pInfo->next) {
++        if (pInfo->drv != driver)
++            continue;
++
++        devices[i].options = xf86InputHotReloadBaseOptions(pInfo);
++        if (pInfo->options && !devices[i].options) {
++            xf86Msg(X_ERROR,
++                    "Input hot reload: cannot copy options for '%s'\n",
++                    pInfo->name);
++            xf86InputHotReloadFreeSnapshots(devices, count);
++            return;
++        }
++        devices[i].attrs = DuplicateInputAttributes(pInfo->attrs);
++        if (pInfo->attrs && !devices[i].attrs) {
++            xf86Msg(X_ERROR,
++                    "Input hot reload: cannot copy attributes for '%s'\n",
++                    pInfo->name);
++            xf86InputHotReloadFreeSnapshots(devices, count);
++            return;
++        }
++        devices[i].name = xstrdup(pInfo->name);
++        if (!devices[i].name) {
++            xf86Msg(X_ERROR,
++                    "Input hot reload: cannot copy name for '%s'\n",
++                    pInfo->name);
++            xf86InputHotReloadFreeSnapshots(devices, count);
++            return;
++        }
++        devices[i].old_dev = pInfo->dev;
++        devices[i].master = GetMaster(pInfo->dev, MASTER_ATTACHED);
++        devices[i].enabled = pInfo->dev->enabled;
++        i++;
++    }
++
++    if (!xf86ReloadInputClasses()) {
++        xf86Msg(X_ERROR,
++                "Input hot reload: could not reread InputClass configuration; "
++                "reload aborted\n");
++        xf86InputHotReloadFreeSnapshots(devices, count);
++        return;
++    }
++
++    xf86Msg(X_INFO, "Input hot reload: replacing driver '%s' (%d device%s)\n",
++            input_hot_reload_driver, count, count == 1 ? "" : "s");
++
++    input_lock();
++    for (i = 0; i < count; i++)
++        DeleteInputDeviceRequest(devices[i].old_dev);
++
++    xf86DeleteInputDriver(driver_index);
++
++    if (!xf86LoadOneModule(input_hot_reload_driver, NULL) ||
++        !xf86LookupInputDriver(input_hot_reload_driver)) {
++        xf86Msg(X_ERROR,
++                "Input hot reload: failed to load new '%s' module; "
++                "devices remain removed\n",
++                input_hot_reload_driver);
++        input_unlock();
++        xf86InputHotReloadFreeSnapshots(devices, count);
++        return;
++    }
++
++    for (i = 0; i < count; i++) {
++        DeviceIntPtr dev = NULL;
++        InputInfoPtr new_info;
++        int rc;
++
++        rc = NewInputDeviceRequest(devices[i].options, devices[i].attrs, &dev);
++        if (rc != Success) {
++            xf86Msg(X_ERROR,
++                    "Input hot reload: '%s' recreation failed (%d)\n",
++                    devices[i].name, rc);
++            continue;
++        }
++
++        new_info = dev->public.devicePrivate;
++        if (GetMaster(dev, MASTER_ATTACHED) != devices[i].master &&
++            AttachDevice(NULL, dev, devices[i].master) != Success)
++            xf86Msg(X_WARNING,
++                    "Input hot reload: could not restore master for '%s'\n",
++                    new_info->name);
++        if (!devices[i].enabled && dev->enabled)
++            xf86DisableDevice(dev, FALSE);
++        recreated++;
++    }
++
++    xf86Msg(recreated == count ? X_INFO : X_WARNING,
++            "Input hot reload: recreated %d of %d device%s with new '%s' code\n",
++            recreated, count, count == 1 ? "" : "s",
++            input_hot_reload_driver);
++    input_unlock();
++    xf86InputHotReloadFreeSnapshots(devices, count);
++#endif
++}
+ #ifdef HAVE_SYS_UTSNAME_H
+ #include <sys/utsname.h>
+ #endif
+@@ -743,6 +962,45 @@ InputClassMatches(const XF86ConfInputClassPtr iclass, const InputInfoPtr idev,
+     return TRUE;
+ }
+ 
++static XF86OptionPtr
++xf86InputHotReloadRemoveOption(XF86OptionPtr options, const char *name)
++{
++    XF86OptionPtr option = xf86FindOption(options, name);
++
++    if (option)
++        options = input_option_free_element(options, xf86OptionName(option));
++    return options;
++}
++
++static XF86OptionPtr
++xf86InputHotReloadBaseOptions(InputInfoPtr pInfo)
++{
++    XF86ConfInputClassPtr cl;
++    XF86OptionPtr option;
++    XF86OptionPtr options = xf86OptionListDuplicate(pInfo->options);
++
++    if (!options)
++        return NULL;
++
++    for (cl = xf86configptr->conf_inputclass_lst; cl; cl = cl->list.next) {
++        if (!pInfo->attrs || !InputClassMatches(cl, pInfo, pInfo->attrs))
++            continue;
++
++        for (option = cl->option_lst; option; option = xf86NextOption(option))
++            options = xf86InputHotReloadRemoveOption(
++                options, xf86OptionName(option));
++        if (cl->driver)
++            options = xf86InputHotReloadRemoveOption(options, "driver");
++    }
++
++    options = xf86InputHotReloadRemoveOption(options, "fd");
++    options = xf86AddNewOption(options, "driver", input_hot_reload_driver);
++    if (!xf86FindOption(options, "name") &&
++        !xf86FindOption(options, "identifier"))
++        options = xf86AddNewOption(options, "identifier", pInfo->name);
++    return options;
++}
++
+ /*
+  * Merge in any InputClass configurations. Options in each InputClass
+  * section have more priority than the original device configuration as
+diff --git a/hw/xfree86/common/xf86Xinput.h b/hw/xfree86/common/xf86Xinput.h
+index a93c949..5ba0711 100644
+--- a/hw/xfree86/common/xf86Xinput.h
++++ b/hw/xfree86/common/xf86Xinput.h
+@@ -171,6 +171,11 @@ extern _X_EXPORT void xf86AddEnabledDevice(InputInfoPtr pInfo);
+ extern _X_EXPORT void xf86RemoveEnabledDevice(InputInfoPtr pInfo);
+ extern _X_EXPORT void xf86DisableDevice(DeviceIntPtr dev, Bool panic);
+ 
++
++extern void xf86InputHotReloadEnable(const char *driver);
++extern void xf86InputHotReloadInit(void);
++extern void xf86InputHotReloadCheck(void);
++
+ /* xf86Helper.c */
+ extern _X_EXPORT void xf86AddInputDriver(InputDriverPtr driver, void *module,
+                                          int flags);
+diff --git a/hw/xfree86/parser/InputClass.c b/hw/xfree86/parser/InputClass.c
+index 99b8ce8..d1858d5 100644
+--- a/hw/xfree86/parser/InputClass.c
++++ b/hw/xfree86/parser/InputClass.c
+@@ -70,7 +70,7 @@ static const xf86ConfigSymTabRec InputClassTab[] = {
+     {-1, ""},
+ };
+ 
+-static void
++void
+ xf86freeInputClassList(XF86ConfInputClassPtr ptr)
+ {
+     XF86ConfInputClassPtr prev;
+diff --git a/hw/xfree86/parser/OutputClass.c b/hw/xfree86/parser/OutputClass.c
+index 856b411..7daf2e1 100644
+--- a/hw/xfree86/parser/OutputClass.c
++++ b/hw/xfree86/parser/OutputClass.c
+@@ -46,7 +46,7 @@ static const xf86ConfigSymTabRec OutputClassTab[] = {
+     {-1, ""},
+ };
+ 
+-static void
++void
+ xf86freeOutputClassList(XF86ConfOutputClassPtr ptr)
+ {
+     XF86ConfOutputClassPtr prev;
+diff --git a/hw/xfree86/parser/configProcs.h b/hw/xfree86/parser/configProcs.h
+index e20eab5..cbf0ab3 100644
+--- a/hw/xfree86/parser/configProcs.h
++++ b/hw/xfree86/parser/configProcs.h
+@@ -59,10 +59,12 @@ int xf86validateInput(XF86ConfigPtr p);
+ /* InputClass.c */
+ XF86ConfInputClassPtr xf86parseInputClassSection(void);
+ void xf86printInputClassSection(FILE * f, XF86ConfInputClassPtr ptr);
++void xf86freeInputClassList(XF86ConfInputClassPtr ptr);
+ 
+ /* OutputClass.c */
+ XF86ConfOutputClassPtr xf86parseOutputClassSection(void);
+ void xf86printOutputClassSection(FILE * f, XF86ConfOutputClassPtr ptr);
++void xf86freeOutputClassList(XF86ConfOutputClassPtr ptr);
+ 
+ /* Layout.c */
+ XF86ConfLayoutPtr xf86parseLayoutSection(void);
+diff --git a/hw/xfree86/parser/read.c b/hw/xfree86/parser/read.c
+index e1c63b9..ad3c142 100644
+--- a/hw/xfree86/parser/read.c
++++ b/hw/xfree86/parser/read.c
+@@ -302,6 +302,8 @@ xf86freeConfig(XF86ConfigPtr p)
+     xf86freeScreenList(p->conf_screen_lst);
+     xf86freeLayoutList(p->conf_layout_lst);
+     xf86freeInputList(p->conf_input_lst);
++    xf86freeInputClassList(p->conf_inputclass_lst);
++    xf86freeOutputClassList(p->conf_outputclass_lst);
+     xf86freeVendorList(p->conf_vendor_lst);
+     xf86freeDRI(p->conf_dri);
+     xf86freeExtensions(p->conf_extensions);
